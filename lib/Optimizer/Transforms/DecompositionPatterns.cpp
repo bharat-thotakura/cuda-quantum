@@ -460,6 +460,60 @@ struct R1ToRz : public OpRewritePattern<quake::R1Op> {
   }
 };
 
+// Naive mapping of R1 to U3
+// quake.r1(λ) [control] target
+// ───────────────────────────────────
+// quake.u3(0, 0, λ) [control] target
+struct R1ToU3 : public OpRewritePattern<quake::R1Op> {
+  using OpRewritePattern<quake::R1Op>::OpRewritePattern;
+
+  void initialize() { setDebugName("R1ToU3"); }
+
+  LogicalResult matchAndRewrite(quake::R1Op r1Op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = r1Op->getLoc();
+    Value zero = createConstant(loc, 0.0, rewriter.getF64Type(), rewriter);
+    std::array<Value, 3> parameters = {zero, zero, r1Op.getParameters()[0]};
+    rewriter.replaceOpWithNewOp<quake::U3Op>(
+        r1Op, r1Op.isAdj(), parameters, r1Op.getControls(), r1Op.getTargets());
+    return success();
+  }
+};
+
+// quake.r1<adj> (θ) target
+// ─────────────────────────────────
+// quake.r1(-θ) target
+struct R1AdjToR1 : public OpRewritePattern<quake::R1Op> {
+  using OpRewritePattern<quake::R1Op>::OpRewritePattern;
+
+  void initialize() { setDebugName("R1AdjToR1"); }
+
+  LogicalResult matchAndRewrite(quake::R1Op op,
+                                PatternRewriter &rewriter) const override {
+    if (!op.getControls().empty())
+      return failure();
+    if (!op.isAdj())
+      return failure();
+
+    // Op info
+    Location loc = op->getLoc();
+    Value target = op.getTarget();
+    Value angle = op.getParameter();
+    angle = rewriter.create<arith::NegFOp>(loc, angle);
+
+    // Necessary/Helpful constants
+    SmallVector<Value> noControls;
+    SmallVector<Value> parameters = {angle};
+
+    QuakeOperatorCreator qRewriter(rewriter);
+    qRewriter.create<quake::R1Op>(loc, parameters, noControls, target);
+
+    qRewriter.selectWiresAndReplaceUses(op, target);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // quake.swap a, b
 // ───────────────────────────────────
 // quake.cnot b, a;
@@ -1554,6 +1608,8 @@ void cudaq::populateWithAllDecompositionPatterns(RewritePatternSet &patterns) {
     CR1ToCX,
     R1ToPhasedRx,
     R1ToRz,
+    R1ToU3,
+    R1AdjToR1,
     // RxOp patterns
     CRxToCX,
     RxToPhasedRx,

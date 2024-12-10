@@ -13,7 +13,6 @@
 #include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 
 #define DEBUG_TYPE "lower-ast-expr"
 
@@ -2311,8 +2310,10 @@ bool QuakeBridgeVisitor::VisitCXXOperatorCallExpr(
         // replace it with an indirect call to the func::ConstantOp.
         auto indirect = popValue();
         auto funcTy = cast<FunctionType>(indirect.getType());
+        auto convertedArgs =
+            convertKernelArgs(builder, loc, 0, args, funcTy.getInputs());
         auto call = builder.create<func::CallIndirectOp>(
-            loc, funcTy.getResults(), indirect, args);
+            loc, funcTy.getResults(), indirect, convertedArgs);
         if (call.getResults().empty())
           return true;
         return pushValue(call.getResult(0));
@@ -2905,6 +2906,12 @@ bool QuakeBridgeVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *x) {
         return true;
       }
     }
+  }
+
+  if (isa<quake::StruqType>(ctorTy)) {
+    if (quake::isConstantQuantumRefType(ctorTy))
+      return pushValue(builder.create<quake::AllocaOp>(loc, ctorTy));
+    return true;
   }
 
   auto *parent = ctor->getParent();
