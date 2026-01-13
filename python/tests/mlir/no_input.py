@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -30,7 +30,7 @@ def test_make_kernel_no_input():
     print(kernel)
 
 
-# CHECK-LABEL:   func.func @__nvqpp__mlirgen____nvqppBuilderKernel_{{.*}}() attributes {"cudaq-entrypoint"} {
+# CHECK-LABEL:   func.func @__nvqpp__mlirgen____nvqppBuilderKernel_{{.*}}() attributes {"cudaq-entrypoint"
 # CHECK-NEXT:           return
 # CHECK-NEXT:         }
 

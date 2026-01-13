@@ -1,23 +1,15 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-from functools import partialmethod
-import inspect
-import sys
-import random
-import string
-import numpy as np
-import ctypes
 
-from ..mlir.ir import *
-from ..mlir.passmanager import *
-from ..mlir.dialects import quake, cc
-from ..mlir.dialects import builtin, func, arith
-from ..mlir._mlir_libs._quakeDialects import cudaq_runtime
+from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
+from cudaq.mlir.dialects import arith, quake, cc
+from cudaq.mlir.ir import (DenseI32ArrayAttr, F64Type, FloatAttr, Location,
+                           IntegerAttr, IntegerType)
 from .utils import mlirTypeFromPyType
 
 qvector = cudaq_runtime.qvector
@@ -67,7 +59,7 @@ class QuakeValue(object):
 
             if quake.VeqType.isinstance(type):
                 size = quake.VeqType.getSize(type)
-                if size:
+                if quake.VeqType.hasSpecifiedSize(type):
                     return size
                 return QuakeValue(
                     quake.VeqSizeOp(self.intType, self.mlirValue).result,
@@ -334,10 +326,10 @@ class QuakeValue(object):
         with self.ctx, Location.unknown(), self.pyKernel.insertPoint:
             if cc.StdvecType.isinstance(self.mlirValue.type):
                 eleTy = cc.StdvecType.getElementType(self.mlirValue.type)
-                arrTy = cc.ArrayType.get(self.ctx, eleTy)
-                arrPtrTy = cc.PointerType.get(self.ctx, arrTy)
+                arrTy = cc.ArrayType.get(eleTy)
+                arrPtrTy = cc.PointerType.get(arrTy)
                 vecPtr = cc.StdvecDataOp(arrPtrTy, self.mlirValue).result
-                elePtrTy = cc.PointerType.get(self.ctx, eleTy)
+                elePtrTy = cc.PointerType.get(eleTy)
                 eleAddr = None
                 i64Ty = IntegerType.get_signless(64)
                 if isinstance(idx, QuakeValue):
@@ -363,7 +355,7 @@ class QuakeValue(object):
                                                                     idx)).result
                 else:
                     raise RuntimeError("invalid idx passed to QuakeValue.")
-                op = quake.ExtractRefOp(quake.RefType.get(self.ctx),
+                op = quake.ExtractRefOp(quake.RefType.get(),
                                         self.mlirValue,
                                         -1,
                                         index=processedIdx)

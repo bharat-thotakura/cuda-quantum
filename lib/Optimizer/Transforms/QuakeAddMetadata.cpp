@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -132,8 +132,7 @@ private:
       keys.pop_back();
       if (isa<cudaq::cc::IfOp, cudaq::cc::ConditionOp, cf::CondBranchOp,
               quake::MeasurementInterface, quake::OperatorInterface,
-              quake::ApplyOp, cudaq::cc::CallCallableOp, func::CallOp,
-              func::CallIndirectOp>(op)) {
+              quake::ApplyOp, CallOpInterface>(op)) {
         data.hasConditionalsOnMeasure = true;
         data.hasQuantumDataflowViaClassical =
             isa<quake::MeasurementInterface, quake::OperatorInterface>(op);

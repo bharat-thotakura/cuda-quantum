@@ -1,13 +1,13 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-// RUN: cudaq-quake %cpp_std %s | FileCheck %s
-// RUN: cudaq-quake %cpp_std %s | cudaq-opt --lambda-lifting --canonicalize | FileCheck --check-prefixes=LIFT %s
+// RUN: cudaq-quake %s | FileCheck %s
+// RUN: cudaq-quake %s | cudaq-opt --lambda-lifting --canonicalize | FileCheck --check-prefixes=LIFT %s
 
 #include <cudaq.h>
 
@@ -76,13 +76,13 @@ struct test5_caller {
 
 // LIFT-LABEL:   func.func private @__nvqpp__callable.thunk.lambda.0
 // LIFT-SAME:        (%[[VAL_0:.*]]: !cc.callable<(!quake.ref) -> ()>,
-// LIFT-SAME:        %[[VAL_1:.*]]: !quake.ref) {
+// LIFT-SAME:        %[[VAL_1:.*]]: !quake.ref) {{.*}}{
 // LIFT: call @__nvqpp__lifted.lambda.0(%[[VAL_1]]) : (!quake.ref) -> ()
 // LIFT: return
 // LIFT: }
 
 // LIFT-LABEL: func.func private @__nvqpp__lifted.lambda.0
-// LIFT-SAME:   (%[[VAL_0:.*]]: !quake.ref) {
+// LIFT-SAME:   (%[[VAL_0:.*]]: !quake.ref) {{.*}}{
 // LIFT: call @__nvqpp__mlirgen__test5_callable{{.*}}(%[[VAL_0]]) : (!quake.ref) -> ()
 // LIFT: return
 // LIFT: }

@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -11,24 +11,34 @@ from cudaq import spin
 import numpy as np
 
 skipIfUnsupported = pytest.mark.skipif(
-    not (cudaq.num_available_gpus() > 0 and cudaq.mpi.is_initialized() and
-         cudaq.has_target('nvidia-mqpu')),
+    not (cudaq.num_available_gpus() > 0 and cudaq.has_target('nvidia-mqpu')),
     reason="nvidia-mqpu backend not available or mpi not found")
+
+
+@pytest.fixture(scope='session', autouse=True)
+def mpi_init_finalize():
+    cudaq.mpi.initialize()
+    yield
+    cudaq.mpi.finalize()
 
 
 @pytest.fixture(autouse=True)
 def do_something():
     cudaq.set_target('nvidia-mqpu')
-    cudaq.mpi.initialize()
     yield
     cudaq.__clearKernelRegistries()
     cudaq.reset_target()
-    cudaq.mpi.finalize()
 
 
 def check_mpi(entity):
     target = cudaq.get_target()
     numQpus = target.num_qpus()
+    if numQpus == 0:
+        pytest.skip("No QPUs available for target, skipping MPI test")
+    else:
+        print(
+            f"Target: {target}, NumQPUs: {numQpus}, MPI Ranks: {cudaq.mpi.num_ranks()}"
+        )
     # Define its spin Hamiltonian.
     hamiltonian = 5.907 - 2.1433 * spin.x(0) * spin.x(1) - 2.1433 * spin.y(
         0) * spin.y(1) + .21829 * spin.z(0) - 6.125 * spin.z(1)

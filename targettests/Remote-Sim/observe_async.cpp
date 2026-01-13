@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,11 +7,9 @@
  ******************************************************************************/
 
 // REQUIRES: remote-sim
-// REQUIRES: c++20
 
 // clang-format off
-// RUN: nvq++ %cpp_std --target remote-mqpu --remote-mqpu-auto-launch 3 %s -o %t && %t 
-// RUN: nvq++ %cpp_std --enable-mlir --target remote-mqpu --remote-mqpu-auto-launch 3 %s -o %t && %t
+// RUN: nvq++ --target remote-mqpu --remote-mqpu-auto-launch 3 %s -o %t && %t
 // clang-format on
 
 #include "remote_test_assert.h"
@@ -27,9 +25,9 @@ struct ansatz {
 };
 
 int main() {
-  using namespace cudaq::spin;
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
+   cudaq::spin_op h = 5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) - 
+                     2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+                     .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
   // Observe takes the kernel, the spin_op, and the concrete
   // parameters for the kernel
   auto energyFuture = cudaq::observe_async(/*qpu_id=*/0, ansatz{}, h, .59);

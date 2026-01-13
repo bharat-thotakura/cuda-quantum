@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -131,9 +131,9 @@ CUDAQ_TEST(H2MoleculeTester, checkUCCSD) {
     auto eigenVectors = matrix.eigenvectors();
 
     // Map it to a cudaq::state
-    std::vector<cudaq::complex> expectedData(eigenVectors.rows());
-    for (std::size_t i = 0; i < eigenVectors.rows(); i++)
-      expectedData[i] = eigenVectors(i, 0);
+    std::vector<cudaq::complex> expectedData(eigenVectors.cols());
+    for (std::size_t i = 0; i < eigenVectors.cols(); i++)
+      expectedData[i] = eigenVectors(0, i);
     auto groundState = cudaq::get_state(ansatz, std::get<1>(res));
 
     // Make sure our UCCSD state at the optimal parameters is the ground state

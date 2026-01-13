@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -25,12 +25,20 @@
 
 #define DEBUG_TYPE "qir-profile"
 
-/// This file maps full QIR to either the Adaptive Profile QIR or Base Profile
-/// QIR. It is generally assumed that the input QIR here will be generated after
-/// the quake-synth pass, thereby greatly simplifying the transformations
-/// required here.
+/**
+   \file
+
+   This file maps full QIR to either the Adaptive Profile QIR or Base Profile
+   QIR. It is generally assumed that the input QIR here will be generated after
+   the quake-synth pass, thereby greatly simplifying the transformations
+   required here.
+
+   This pass \e only supports QIR version 0.1.
+ */
 
 using namespace mlir;
+
+#include "PeepholePatterns.inc"
 
 /// For a call to `__quantum__rt__qubit_allocate_array`, get the number of
 /// qubits allocated.
@@ -48,7 +56,7 @@ static std::size_t getNumQubits(LLVM::CallOp callOp) {
 static bool isQIRSliceCall(Operation *op) {
   if (auto call = dyn_cast_or_null<LLVM::CallOp>(op)) {
     StringRef funcName = call.getCalleeAttr().getValue();
-    return funcName.equals(cudaq::opt::QIRArraySlice);
+    return funcName == cudaq::opt::QIRArraySlice;
   }
   return false;
 }
@@ -121,12 +129,12 @@ private:
 
       if (isAllocateArray(funcName)) {
         addAllocation([&]() { return getNumQubits(callOp); });
-      } else if (funcName.equals(cudaq::opt::QIRQubitAllocate)) {
+      } else if (funcName == cudaq::opt::QIRQubitAllocate) {
         addAllocation([]() { return 1; });
-      } else if (funcName.equals(cudaq::opt::QIRMeasure) ||
+      } else if (funcName == cudaq::opt::QIRMeasure ||
                  // FIXME Store the register names for the record_output
                  // functions
-                 funcName.equals(cudaq::opt::QIRMeasureToRegister)) {
+                 funcName == cudaq::opt::QIRMeasureToRegister) {
         std::optional<std::size_t> optQb;
         if (auto allocCall =
                 callOp.getOperand(0).getDefiningOp<LLVM::CallOp>()) {
@@ -219,13 +227,15 @@ struct AddFuncAttribute : public OpRewritePattern<LLVM::LLVMFuncOp> {
 
     auto requiredQubitsStr = std::to_string(info.nQubits);
     StringRef requiredQubitsStrRef = requiredQubitsStr;
-    if (auto stringAttr = op->getAttr(cudaq::opt::QIRRequiredQubitsAttrName)
-                              .dyn_cast_or_null<mlir::StringAttr>())
+    if (auto stringAttr =
+            op->getAttr(cudaq::opt::qir0_1::RequiredQubitsAttrName)
+                .dyn_cast_or_null<mlir::StringAttr>())
       requiredQubitsStrRef = stringAttr;
     auto requiredResultsStr = std::to_string(info.nResults);
     StringRef requiredResultsStrRef = requiredResultsStr;
-    if (auto stringAttr = op->getAttr(cudaq::opt::QIRRequiredResultsAttrName)
-                              .dyn_cast_or_null<mlir::StringAttr>())
+    if (auto stringAttr =
+            op->getAttr(cudaq::opt::qir0_1::RequiredResultsAttrName)
+                .dyn_cast_or_null<mlir::StringAttr>())
       requiredResultsStrRef = stringAttr;
     StringRef outputNamesStrRef;
     std::string resultQubitJSONStr;
@@ -238,7 +248,8 @@ struct AddFuncAttribute : public OpRewritePattern<LLVM::LLVMFuncOp> {
     }
 
     // QIR functions need certain attributes, add them here.
-    // TODO: Update schema_id with valid value (issues #385 and #556)
+    // This pass is deprecated and will always use QIR 0.1. Future extensions
+    // are not required either.
     SmallVector<Attribute> attrArray{
         rewriter.getStringAttr(cudaq::opt::QIREntryPointAttrName),
         rewriter.getStrArrayAttr(
@@ -248,13 +259,11 @@ struct AddFuncAttribute : public OpRewritePattern<LLVM::LLVMFuncOp> {
         rewriter.getStrArrayAttr(
             {cudaq::opt::QIROutputNamesAttrName, outputNamesStrRef}),
         rewriter.getStrArrayAttr(
-            // TODO: change to required_num_qubits once providers support it
-            // (issues #385 and #556)
-            {cudaq::opt::QIRRequiredQubitsAttrName, requiredQubitsStrRef}),
+            {cudaq::opt::qir0_1::RequiredQubitsAttrName, requiredQubitsStrRef}),
         rewriter.getStrArrayAttr(
-            // TODO: change to required_num_results once providers support it
-            // (issues #385 and #556)
-            {cudaq::opt::QIRRequiredResultsAttrName, requiredResultsStrRef})};
+            // This pass is deprecated and will always use QIR 0.1.
+            {cudaq::opt::qir0_1::RequiredResultsAttrName,
+             requiredResultsStrRef})};
 
     op.setPassthroughAttr(rewriter.getArrayAttr(attrArray));
 
@@ -363,8 +372,8 @@ struct QIRToQIRProfileFuncPass
       if (!funcNameAttr)
         return true;
       auto funcName = funcNameAttr.getValue();
-      return (!funcName.equals(cudaq::opt::QIRArrayQubitAllocateArray) &&
-              !funcName.equals(cudaq::opt::QIRQubitAllocate)) ||
+      return (funcName != cudaq::opt::QIRArrayQubitAllocateArray &&
+              funcName != cudaq::opt::QIRQubitAllocate) ||
              op->hasAttr(cudaq::opt::StartingOffsetAttrName);
     });
 
@@ -516,7 +525,7 @@ namespace {
 /// trivial pass only does this preparation work. It performs no analysis and
 /// does not rewrite function body's, etc.
 
-static const std::vector<std::string> measurementFunctionNames{
+static constexpr std::array<const char *, 3> measurementFunctionNames{
     cudaq::opt::QIRMeasureBody, cudaq::opt::QIRMeasure,
     cudaq::opt::QIRMeasureToRegister};
 
@@ -544,7 +553,7 @@ struct QIRProfilePreparationPass
         module);
 
     cudaq::opt::factory::createLLVMFunctionSymbol(
-        cudaq::opt::QIRReadResultBody, IntegerType::get(ctx, 1),
+        cudaq::opt::qir0_1::ReadResultBody, IntegerType::get(ctx, 1),
         {cudaq::opt::getResultType(ctx)}, module);
 
     // Add record functions for any measurements.
@@ -564,7 +573,7 @@ struct QIRProfilePreparationPass
               func.getFunctionType().getParams(), module);
 
     // Apply irreversible attribute to measurement functions
-    for (auto &funcName : measurementFunctionNames) {
+    for (auto *funcName : measurementFunctionNames) {
       Operation *op = SymbolTable::lookupSymbolIn(module, funcName);
       auto funcOp = llvm::dyn_cast_if_present<LLVM::LLVMFuncOp>(op);
       if (funcOp) {
@@ -585,14 +594,17 @@ std::unique_ptr<Pass> cudaq::opt::createQIRProfilePreparationPass() {
 //===----------------------------------------------------------------------===//
 // The various passes defined here should be added as a pass pipeline.
 
-void cudaq::opt::addQIRProfilePipeline(OpPassManager &pm,
-                                       llvm::StringRef convertTo,
-                                       bool performPrep) {
-  assert(convertTo == "qir-adaptive" || convertTo == "qir-base");
-  if (performPrep)
-    pm.addPass(createQIRProfilePreparationPass());
-  pm.addNestedPass<LLVM::LLVMFuncOp>(createConvertToQIRFuncPass(convertTo));
-  pm.addPass(createQIRToQIRProfilePass(convertTo));
+void cudaq::opt::addQIRProfileVerify(OpPassManager &pm,
+                                     llvm::StringRef convertTo) {
   VerifyQIRProfileOptions vqpo = {convertTo.str()};
   pm.addNestedPass<LLVM::LLVMFuncOp>(createVerifyQIRProfile(vqpo));
+}
+
+void cudaq::opt::addQIRProfilePipeline(OpPassManager &pm,
+                                       llvm::StringRef convertTo) {
+  assert(convertTo == "qir-adaptive" || convertTo == "qir-base");
+  pm.addPass(createQIRProfilePreparationPass());
+  pm.addNestedPass<LLVM::LLVMFuncOp>(createConvertToQIRFuncPass(convertTo));
+  pm.addPass(createQIRToQIRProfilePass(convertTo));
+  addQIRProfileVerify(pm, convertTo);
 }

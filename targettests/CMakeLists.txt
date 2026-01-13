@@ -1,10 +1,14 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
+
+# Add the custom target config generator test to the build, 
+# it will generate the yml file in the build directory required for a lit test.
+add_subdirectory(TargetConfig/custom_sim)
 
 llvm_canonicalize_cmake_booleans(
   CUDA_FOUND

@@ -1,18 +1,18 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-from ..mlir._mlir_libs._quakeDialects import cudaq_runtime  # exposes state class
+import matplotlib.pyplot as plt
 import numpy as np
 from math import isclose  # builtin
-import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-
 from qutip import Qobj, Bloch
+
+from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime  # exposes state class
 
 
 def add_to_bloch_sphere(psi: cudaq_runtime.State,

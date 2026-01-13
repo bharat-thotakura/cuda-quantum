@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -8,7 +8,7 @@
 
 add_library(nvqir-qpp-observe-test SHARED QPPObserveBackend.cpp)
 set (QPP_TEST_DEPENDENCIES "")
-list(APPEND QPP_TEST_DEPENDENCIES fmt::fmt-header-only cudaq-common cudaq-spin)
+list(APPEND QPP_TEST_DEPENDENCIES fmt::fmt-header-only cudaq-common cudaq-operator)
 add_openmp_configurations(nvqir-qpp-observe-test QPP_TEST_DEPENDENCIES)
 
 target_include_directories(nvqir-qpp-observe-test
@@ -34,7 +34,7 @@ target_link_libraries(test_observe_backend
   cudaq
   nvqir 
   nvqir-qpp-observe-test
-  cudaq-spin 
+  cudaq-operator
   cudaq-platform-default 
   cudaq-em-default
   gtest_main)

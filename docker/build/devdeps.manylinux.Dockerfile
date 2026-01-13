@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -78,22 +78,24 @@ RUN dnf install -y --nobest --setopt=install_weak_deps=False \
     && cmake --build . --target install --config Release \
     && cd / && rm -rf /pybind11-project
 
-RUN curl -L https://github.com/Kitware/CMake/releases/download/v3.26.4/cmake-3.26.4-linux-$(uname -m).sh -o cmake-install.sh \
+RUN curl -L https://github.com/Kitware/CMake/releases/download/v3.28.4/cmake-3.28.4-linux-$(uname -m).sh -o cmake-install.sh \
     && bash cmake-install.sh --skip-licence --exclude-subdir --prefix=/usr/local \
     && rm cmake-install.sh
 
 # Build the the LLVM libraries and compiler toolchain needed to build CUDA-Q.
 ADD ./scripts/build_llvm.sh /scripts/build_llvm.sh
 ADD ./cmake/caches/LLVM.cmake /cmake/caches/LLVM.cmake
+ADD ./tpls/customizations/llvm/ /tpls/customizations/llvm/
 RUN LLVM_PROJECTS='clang;mlir' LLVM_SOURCE=/llvm-project \
     LLVM_CMAKE_CACHE=/cmake/caches/LLVM.cmake \
+    LLVM_CMAKE_PATCHES=/tpls/customizations/llvm \
     bash /scripts/build_llvm.sh -c Release -v
     # No clean up of the build or source directory,
     # since we need to re-build llvm for each python version to get the bindings.
 
 # Install CUDA
 
-ARG cuda_version=11.8
+ARG cuda_version=12.6
 ENV CUDA_VERSION=${cuda_version}
 
 RUN arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
@@ -102,7 +104,9 @@ RUN arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
     && dnf install -y --nobest --setopt=install_weak_deps=False wget \
         cuda-compiler-$(echo ${CUDA_VERSION} | tr . -) \
         cuda-cudart-devel-$(echo ${CUDA_VERSION} | tr . -) \
-        libcublas-devel-$(echo ${CUDA_VERSION} | tr . -)
+        libcublas-devel-$(echo ${CUDA_VERSION} | tr . -) \
+        libcurand-devel-$(echo ${CUDA_VERSION} | tr . -) \
+        libcusparse-devel-$(echo ${CUDA_VERSION} | tr . -)
 
 ENV CUDA_INSTALL_PREFIX=/usr/local/cuda-$CUDA_VERSION
 ENV CUDA_HOME="$CUDA_INSTALL_PREFIX"

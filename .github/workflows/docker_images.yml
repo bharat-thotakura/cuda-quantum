@@ -59,24 +59,24 @@ jobs:
     steps:
       - id: info
         run: |
+          is_versioned=${{ github.ref_type == 'tag' || startsWith(github.ref_name, 'releases/') || startsWith(github.ref_name, 'staging/') }}
+          echo "is_versioned=$is_versioned" >> $GITHUB_OUTPUT
           if [ -n "$(echo ${{ inputs.platforms }} | grep ',')" ]; then
             # multi-platform builds get no platform tag
-            echo "runner=linux-amd64-cpu8" >> $GITHUB_OUTPUT
+            echo "runner=linux-amd64-cpu16" >> $GITHUB_OUTPUT
             echo "build_docs=${{ inputs.build_docs != 'false' }}" >> $GITHUB_OUTPUT
-            is_versioned=${{ github.ref_type == 'tag' || startsWith(github.ref_name, 'releases/') || startsWith(github.ref_name, 'staging/') }}
             has_continuous_deployment=${{ startsWith(github.ref_name, 'experimental/') || github.ref_name == 'main' }}
             push_to_ngc=`${{ inputs.environment && secrets.NGC_CREDENTIALS != '' }} && ($is_versioned || $has_continuous_deployment) && echo true || echo`
-            echo "is_versioned=$is_versioned" >> $GITHUB_OUTPUT
             echo "push_to_ngc=$push_to_ngc" >> $GITHUB_OUTPUT
           elif [ -n "$(echo ${{ inputs.platforms }} | grep -i arm)" ]; then
             platform_tag=`echo ${{ inputs.platforms }} | sed 's/linux\///g' | tr -d ' '`
             echo "platform_tag=$platform_tag" >> $GITHUB_OUTPUT
-            echo "runner=linux-arm64-cpu8" >> $GITHUB_OUTPUT
+            echo "runner=linux-arm64-cpu16" >> $GITHUB_OUTPUT
             echo "build_docs=${{ inputs.build_docs == 'true' }}" >> $GITHUB_OUTPUT
           else
             platform_tag=`echo ${{ inputs.platforms }} | sed 's/linux\///g' | tr -d ' '`
             echo "platform_tag=$platform_tag" >> $GITHUB_OUTPUT
-            echo "runner=linux-amd64-cpu8" >> $GITHUB_OUTPUT
+            echo "runner=linux-amd64-cpu16" >> $GITHUB_OUTPUT
             echo "build_docs=${{ inputs.build_docs != 'false' }}" >> $GITHUB_OUTPUT
           fi
 
@@ -161,8 +161,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           endpoint: builder_context
-          driver-opts: network=host
-
+          version: v0.19.0
+          buildkitd-config: ${{ needs.metadata.outputs.runner != 'ubuntu-latest' && '/etc/buildkit/buildkitd.toml' || null }}
+          driver-opts: |
+            network=host
+            image=moby/buildkit:v0.19.0
+   
       - name: Build Open MPI
         id: docker_build
         uses: docker/build-push-action@v5
@@ -171,7 +175,7 @@ jobs:
           file: ./docker/build/devdeps.ext.Dockerfile
           build-args: |
             ompidev_image=${{ inputs.ompidev_image }}
-            base_image=nvidia/cuda:${{ inputs.cuda_version }}.0-runtime-ubuntu22.04
+            base_image=nvcr.io/nvidia/cuda:${{ inputs.cuda_version }}.0-runtime-ubuntu24.04
             cuda_version=${{ inputs.cuda_version }}
             cuda_packages=
           tags: ${{ steps.metadata.outputs.tags }}
@@ -308,7 +312,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           endpoint: builder_context
-          driver-opts: network=host
+          version: v0.19.0
+          buildkitd-config: ${{ needs.metadata.outputs.runner != 'ubuntu-latest' && '/etc/buildkit/buildkitd.toml' || null }}
+          driver-opts: |
+            network=host
+            image=moby/buildkit:v0.19.0
 
       - name: Extract metadata
         id: metadata
@@ -336,6 +344,15 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: ${{ inputs.environment != '' }}
           outputs: ${{ steps.prereqs.outputs.docker_output }}
+
+      - name: Write matrix outputs
+        uses: cloudposse/github-action-matrix-outputs-write@1.0.0
+        with:
+          matrix-step-name: docker_images
+          matrix-key: ${{ needs.metadata.outputs.platform_tag }}-cu${{ inputs.cuda_version }}-dev-image
+          outputs: |
+            digest: ${{ steps.docker_build.outputs.digest }}
+            image_tag: ${{ steps.metadata.outputs.tags }}
 
       - name: Install Cosign
         if: inputs.environment
@@ -434,7 +451,7 @@ jobs:
         id: prereqs
         run: |
           if ${{ needs.ompi_image.result == 'skipped' }}; then
-            base_image=ghcr.io/nvidia/ubuntu:22.04
+            base_image=ghcr.io/nvidia/ubuntu:24.04
           elif ${{ steps.restore_openmpi.outcome != 'skipped' }}; then
             load_output=`docker load --input "${{ needs.ompi_image.outputs.tar_archive }}"`
             base_image=`echo "$load_output" | grep -o 'Loaded image: \S*:\S*' | head -1 | cut -d ' ' -f 3`
@@ -477,6 +494,7 @@ jobs:
 
           platform_tag=${{ needs.metadata.outputs.platform_tag }}
           cuda_major=`echo ${{ inputs.cuda_version }} | cut -d . -f1`
+          deprecation_notice=""
           image_tag=${platform_tag:+$platform_tag-}${cuda_major:+cu${cuda_major}-}
           if ${{ github.event.pull_request.number != '' }} || [ -n "$(echo ${{ github.ref_name }} | grep pull-request/)" ]; then
             pr_number=`echo ${{ github.ref_name }} | grep -o [0-9]*`
@@ -496,6 +514,7 @@ jobs:
           echo "base_image=$base_image" >> $GITHUB_OUTPUT
           echo "devdeps_image=$devdeps_image" >> $GITHUB_OUTPUT
           echo "dev_image_name=$dev_image_name" >> $GITHUB_OUTPUT
+          echo "deprecation_notice=$deprecation_notice" >> $GITHUB_OUTPUT
 
           if ${{ inputs.environment == '' }}; then
             tar_archive=/tmp/cuda-quantum.tar
@@ -512,7 +531,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           endpoint: builder_context
-          driver-opts: network=host
+          version: v0.19.0
+          buildkitd-config: ${{ needs.metadata.outputs.runner != 'ubuntu-latest' && '/etc/buildkit/buildkitd.toml' || null }}
+          driver-opts: |
+            network=host
+            image=moby/buildkit:v0.19.0
 
       - name: Extract cuda-quantum-dev metadata
         id: cudaqdev_metadata
@@ -593,12 +616,22 @@ jobs:
             cudaqdev_image=${{ steps.prereqs.outputs.dev_image_name }}@${{ steps.release_build.outputs.digest }}
             base_image=${{ steps.prereqs.outputs.base_image }}
             release_version=${{ steps.prereqs.outputs.image_tag }}
+            deprecation_notice=${{ steps.prereqs.outputs.deprecation_notice }}
           tags: ${{ steps.cudaq_metadata.outputs.tags }}
           labels: ${{ steps.cudaq_metadata.outputs.labels }}
           platforms: ${{ inputs.platforms }}
           provenance: false
           push: ${{ inputs.environment != '' }}
           outputs: ${{ steps.prereqs.outputs.docker_output }}
+
+      - name: Write matrix outputs
+        uses: cloudposse/github-action-matrix-outputs-write@1.0.0
+        with:
+          matrix-step-name: docker_images
+          matrix-key: ${{ needs.metadata.outputs.platform_tag }}-cu${{ inputs.cuda_version }}-image
+          outputs: |
+            digest: ${{ steps.cudaq_build.outputs.digest }}
+            image_tag: ${{ steps.cudaq_metadata.outputs.tags }}
 
       - name: Cache cuda-quantum image
         if: steps.prereqs.outputs.tar_cache && steps.prereqs.outputs.tar_archive
@@ -693,8 +726,8 @@ jobs:
             docker pull $cudaq_image
           fi
 
-          image_tag=`docker inspect $cudaq_image --format='{{json .Config.Labels}}' | jq -r '."org.opencontainers.image.version"'`
-          docs_version="CUDA_QUANTUM_VERSION=${image_tag%-base}"
+          image_tag=`docker inspect $cudaq_image --format='{{json .Config.Labels}}' | jq -r '."org.opencontainers.image.version"' | sed -E 's/^(arm64-|amd64-)//'`
+          docs_version="CUDA_QUANTUM_VERSION=$(echo $image_tag | sed -re 's/^(cu[0-9]+-)?(.*)-base$/\2/')"
           docker image rm $cudaq_image
           docker image prune --force
 
@@ -707,10 +740,6 @@ jobs:
           fi
 
           docker run --rm -dit --network host --name cuda-quantum-dev $cudaqdev_image
-          # Unfortunately, we need to install cuquantum for docs generation to work properly, 
-          # since using mock imports in the autodocs configuration doesn't work properly. 
-          # See also https://github.com/sphinx-doc/sphinx/issues/11211. 
-          docker exec cuda-quantum-dev bash -c "python3 -m pip install cuquantum-python-cu12~=24.11"
           
           (docker exec cuda-quantum-dev bash -c "export $docs_version && bash scripts/build_docs.sh" && built=true) || built=false
           if $built; then docker cp cuda-quantum-dev:"/usr/local/cudaq/docs/." docs; \
@@ -811,7 +840,8 @@ jobs:
           docker cp docs/notebook_validation.py cuda-quantum:"/home/cudaq/notebook_validation.py"
           # In containers without GPU support, UCX does not work properly since it is configured to work with GPU-support.
           # Hence, don't enforce UCX when running these tests.
-          docker exec cuda-quantum bash -c "python3 -m pip install pandas scipy pandas seaborn 'h5py<3.11' contfrac"
+          docker exec cuda-quantum bash -c "python3 -m pip install --break-system-packages pandas scipy seaborn h5py contfrac"
+          docker exec cuda-quantum bash -c "sudo apt install -y python3-venv"
           (docker exec cuda-quantum bash -c "unset OMPI_MCA_pml && set -o pipefail && bash validate_container.sh | tee /tmp/validation.out") && passed=true || passed=false
           docker cp cuda-quantum:"/tmp/validation.out" /tmp/validation.out
           docker stop cuda-quantum

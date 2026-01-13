@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -23,7 +23,7 @@
 # then the toolchain will be built from source.
 
 # [Operating System]
-ARG base_image=ubuntu:22.04
+ARG base_image=ubuntu:24.04
 
 # [CUDA-Q Dependencies]
 FROM ${base_image} AS prereqs
@@ -51,12 +51,14 @@ ENV ZLIB_INSTALL_PREFIX=/usr/local/zlib
 ENV OPENSSL_INSTALL_PREFIX=/usr/local/openssl
 ENV CURL_INSTALL_PREFIX=/usr/local/curl
 ENV AWS_INSTALL_PREFIX=/usr/local/aws
+# TODO: eliminate the need for this
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 ## [Build Dependencies]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget git unzip \
         python3-dev python3-pip && \
-    python3 -m pip install --no-cache-dir numpy && \
+    python3 -m pip install --no-cache-dir numpy --break-system-packages && \
     apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/*
 ADD scripts/install_toolchain.sh /cuda-quantum/scripts/install_toolchain.sh
 RUN source /cuda-quantum/scripts/install_toolchain.sh \
@@ -145,30 +147,28 @@ COPY --from=prereqs /usr/local/aws "$AWS_INSTALL_PREFIX"
 
 # Install additional dependencies required to build and test CUDA-Q.
 RUN apt-get update && apt-get install --no-install-recommends -y wget ca-certificates \
-    && wget https://github.com/Kitware/CMake/releases/download/v3.26.4/cmake-3.26.4-linux-$(uname -m).tar.gz \
-    && tar xf cmake-3.26.4* && mv cmake-3.26.4-linux-$(uname -m)/ /usr/local/cmake-3.26/ && rm -rf cmake-3.26.4* \
+    && wget https://github.com/Kitware/CMake/releases/download/v3.28.4/cmake-3.28.4-linux-$(uname -m).tar.gz \
+    && tar xf cmake-3.28.4* && mv cmake-3.28.4-linux-$(uname -m)/ /usr/local/cmake-3.28/ && rm -rf cmake-3.28.4* \
     # NOTE: removing ca-certificates also remove python3-pip.
     && apt-get remove -y wget ca-certificates \
     && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/*
-ENV PATH="${PATH}:/usr/local/cmake-3.26/bin"
-# We must use h5py<3.11 because 3.11 doesn't include aarch64 Linux wheels.
-# https://github.com/h5py/h5py/issues/2408
+ENV PATH="${PATH}:/usr/local/cmake-3.28/bin"
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git gdb ninja-build file lldb \
         python3 python3-pip libpython3-dev \
-    && python3 -m pip install --no-cache-dir \
-        lit==18.1.4 pytest==8.2.0 numpy==1.26.4 requests==2.31.0 \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+        lit==18.1.4 pytest==8.3.0 numpy==1.26.4 requests==2.31.0 \
         fastapi==0.111.0 uvicorn==0.29.0 pydantic==2.7.1 llvmlite==0.42.0 \
         pyspelling==2.10 pymdown-extensions==10.8.1 yapf \
-        scipy==1.10.1 openfermionpyscf==0.5 'h5py<3.11' \
+        scipy==1.11.4 openfermionpyscf==0.5 h5py==3.12.1 \
     && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install additional tools for CUDA-Q documentation generation.
 COPY --from=prereqs /usr/local/bin/doxygen /usr/local/bin/doxygen
 ENV PATH="${PATH}:/usr/local/bin"
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip pandoc aspell aspell-en \
-    && python3 -m pip install --no-cache-dir \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
         ipython==8.15.0 pandoc==2.3 sphinx==5.3.0 sphinx_rtd_theme==1.2.0 sphinx-reredirects==0.1.2 \
         sphinx-copybutton==0.5.2 sphinx_inline_tabs==2023.4.21 enum-tools[sphinx] breathe==4.34.0 \
-        nbsphinx==0.9.2 sphinx_gallery==0.13.0 myst-parser==1.0.0 ipykernel==6.29.4 notebook==7.1.3 \
-        ipywidgets==8.1.5
+        nbsphinx==0.9.2 sphinx_gallery==0.13.0 myst-parser==1.0.0 ipykernel==6.29.4 notebook==7.3.2 \
+        ipywidgets==8.1.5 sphinx-tags==0.4

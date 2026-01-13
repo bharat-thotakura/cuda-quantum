@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -19,12 +19,15 @@
 #include <complex>
 #include <vector>
 
+namespace quake {
+class StateType;
+}
+
 namespace cudaq {
 namespace cc {
 class CharspanType;
 class LoopOp;
 class PointerType;
-class StateType;
 class StructType;
 } // namespace cc
 
@@ -79,6 +82,8 @@ cudaq::cc::PointerType getIndexedObjectType(mlir::Type eleTy);
 
 mlir::Type genArgumentBufferType(mlir::Type ty);
 
+bool isStlVectorBoolHostType(mlir::Type ty);
+
 /// Build an LLVM struct type with all the arguments and then all the results.
 /// If the type is a std::vector, then add an i64 to the struct for the
 /// length. The actual data values will be appended to the end of the
@@ -86,16 +91,21 @@ mlir::Type genArgumentBufferType(mlir::Type ty);
 ///
 /// A kernel signature of
 /// ```c++
-/// i32_t operator() (i16_t, std::vector<double>, double);
+///   i32_t operator() (i16_t, std::vector<double>, double);
 /// ```
 /// will generate the LLVM struct
 /// ```llvm
-/// { i16, i64, double, i32 }
+///   { i16, i64, double, i32 }
 /// ```
 /// where the values of the vector argument are pass-by-value and appended to
 /// the end of the struct as a sequence of \i n double values.
 ///
 /// The leading `startingArgIdx + 1` parameters are omitted from the struct.
+///
+/// NB: It is DEEPLY INCORRECT to add a packed attribute to this data structure
+/// and pass it to other APIs, since there is absolutely, positively NO chance
+/// that foreign code will be able to decode this buffer correctly. To do so
+/// requires information that is erased by the NVQ++ compiler.
 cudaq::cc::StructType buildInvokeStructType(mlir::FunctionType funcTy,
                                             std::size_t startingArgIdx = 0);
 
@@ -168,6 +178,8 @@ inline mlir::Value createFloatConstant(mlir::Location loc,
 inline mlir::Value createFloatConstant(mlir::Location loc,
                                        mlir::OpBuilder &builder, double value,
                                        mlir::FloatType type) {
+  if (type == builder.getF32Type())
+    return createFloatConstant(loc, builder, llvm::APFloat((float)value), type);
   return createFloatConstant(loc, builder, llvm::APFloat(value), type);
 }
 
@@ -186,6 +198,8 @@ std::optional<double> maybeValueOfFloatConstant(mlir::Value v);
 /// \em{not} control dependent (other than on function entry).
 mlir::Value createLLVMTemporary(mlir::Location loc, mlir::OpBuilder &builder,
                                 mlir::Type type, std::size_t size = 1);
+mlir::Value createTemporary(mlir::Location loc, mlir::OpBuilder &builder,
+                            mlir::Type type, std::size_t size = 1);
 
 //===----------------------------------------------------------------------===//
 
@@ -282,6 +296,7 @@ std::pair<mlir::func::FuncOp, /*alreadyDefined=*/bool>
 getOrAddFunc(mlir::Location loc, mlir::StringRef funcName,
              mlir::FunctionType funcTy, mlir::ModuleOp module);
 
+void mergeModules(mlir::ModuleOp into, mlir::ModuleOp from);
 } // namespace factory
 
 std::size_t getDataSize(llvm::DataLayout &dataLayout, mlir::Type ty);

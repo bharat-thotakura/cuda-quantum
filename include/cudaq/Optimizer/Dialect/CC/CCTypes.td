@@ -1,5 +1,5 @@
 /********************************************************** -*- tablegen -*- ***
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -83,6 +83,7 @@ def cc_StructType : CCType<"Struct", "struct",
   );
 
   let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
 
   let builders = [
     TypeBuilder<(ins CArg<"llvm::StringRef">:$name,
@@ -154,6 +155,7 @@ def cc_ArrayType : CCType<"Array", "array"> {
   );
 
   let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
 
   let extraClassDeclaration = [{
     using SizeType = std::int64_t;
@@ -249,6 +251,8 @@ def cc_StdVectorType : CCType<"Stdvec", "stdvec", [],
 
   let assemblyFormat = "`<` qualified($elementType) `>`";
 
+  let genVerifyDecl = 1;
+
   let builders = [
     TypeBuilderWithInferredContext<(ins "mlir::Type":$elementType), [{
       return Base::get(elementType.getContext(), elementType);
@@ -284,33 +288,29 @@ def cc_CharSpanType
   }];
 }
 
-def IsSpanLikePred : CPred<"$_self.isa<cudaq::cc::SpanLikeType>()">;
+def IsSpanLikePred : CPred<"isa<cudaq::cc::SpanLikeType>($_self)">;
 def SpanningType : Type<IsSpanLikePred, "dynamic length type">;
-
-//===----------------------------------------------------------------------===//
-// StateType
-//===----------------------------------------------------------------------===//
-
-def cc_StateType : CCType<"State", "state"> {
-  let summary = "Proxy for the cudaq::state class.";
-  let description = [{
-    The cudaq::state class is an abstraction for any data that may be used to
-    describe the initial state of a set of qubits. It would typically be used
-    in a simulation environment.
-
-    The CUDA-Q runtime will implement an ABI of intrinsic functions for the
-    compiler generated code to interface with this information in a generic
-    manner.
-
-    There are no legal operations in Quake/CC on a value of type `!cc.state`.
-    Only pointers to such values should exist in the IR for the purposes of
-    passing references to state objects to runtime functions at codegen.
-  }];
-  let genStorageClass = 0;
-}
 
 def AnyStateInitLike : TypeConstraint<cc_PointerType.predicate,
                          "state initializer types">;
 def AnyStateInitType : Type<AnyStateInitLike.predicate, "initial state type">;
+
+def IsStdvecTypePred : CPred<"$_self.isa<::cudaq::cc::StdvecType>()">;
+
+class StdvecOf<list<Type> allowedTypes> : Type<
+    And<[IsStdvecTypePred, Concat<"[](::mlir::Type elementType) { return ",
+      SubstLeaves<"$_self", "elementType", AnyTypeOf<allowedTypes>.predicate>,
+        "; }($_self.cast<::cudaq::cc::StdvecType>().getElementType())">]>,
+    "stdvec of " # AnyTypeOf<allowedTypes>.summary # " values",
+    "::cudaq::cc::StdvecType">;
+
+def IsPointerTypePred : CPred<"$_self.isa<::cudaq::cc::PointerType>()">;
+
+class PointerOf<list<Type> allowedTypes> : Type<
+    And<[IsPointerTypePred, Concat<"[](::mlir::Type elementType) { return ",
+      SubstLeaves<"$_self", "elementType", AnyTypeOf<allowedTypes>.predicate>,
+        "; }($_self.cast<::cudaq::cc::PointerType>().getElementType())">]>,
+    "pointer of " # AnyTypeOf<allowedTypes>.summary # " values",
+    "::cudaq::cc::PointerType">;
 
 #endif // CUDAQ_DIALECT_CC_TYPES_TD

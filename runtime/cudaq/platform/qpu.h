@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -22,7 +22,6 @@
 namespace cudaq {
 class gradient;
 class optimizer;
-class SerializedCodeExecutionContext;
 
 /// Expose the function that will return the current ExecutionManager
 ExecutionManager *getExecutionManager();
@@ -73,7 +72,8 @@ protected:
                                  "without a cudaq::spin_op.");
 
       std::vector<cudaq::ExecutionResult> results;
-      cudaq::spin_op &H = *localContext->spin.value();
+      cudaq::spin_op &H = localContext->spin.value();
+      assert(cudaq::spin_op::canonicalize(H) == H);
 
       // If the backend supports the observe task,
       // let it compute the expectation value instead of
@@ -86,17 +86,17 @@ protected:
       } else {
 
         // Loop over each term and compute coeff * <term>
-        H.for_each_term([&](cudaq::spin_op &term) {
+        for (const auto &term : H) {
           if (term.is_identity())
-            sum += term.get_coefficient().real();
+            sum += term.evaluate_coefficient().real();
           else {
             // This takes a longer time for the first iteration unless
             // flushGateQueue() is called above.
             auto [exp, data] = cudaq::measure(term);
-            results.emplace_back(data.to_map(), term.to_string(false), exp);
-            sum += term.get_coefficient().real() * exp;
+            results.emplace_back(data.to_map(), term.get_term_id(), exp);
+            sum += term.evaluate_coefficient().real() * exp;
           }
-        });
+        };
 
         localContext->expectationValue = sum;
         localContext->result = cudaq::sample_result(sum, results);
@@ -128,6 +128,7 @@ public:
   }
 
   virtual void setNoiseModel(const noise_model *model) { noiseModel = model; }
+  virtual const noise_model *getNoiseModel() { return noiseModel; }
 
   /// Return the number of qubits
   std::size_t getNumQubits() { return numQubits; }
@@ -138,6 +139,9 @@ public:
 
   /// @brief Return whether this QPU has conditional feedback support
   virtual bool supportsConditionalFeedback() { return false; }
+
+  /// @brief Return whether this QPU supports explicit measurements
+  virtual bool supportsExplicitMeasurements() { return true; }
 
   /// @brief Return the remote capabilities for this platform.
   virtual RemoteCapabilities getRemoteCapabilities() const {
@@ -165,7 +169,7 @@ public:
   virtual void setTargetBackend(const std::string &backend) {}
 
   virtual void launchVQE(const std::string &name, const void *kernelArgs,
-                         cudaq::gradient *gradient, cudaq::spin_op H,
+                         cudaq::gradient *gradient, const cudaq::spin_op &H,
                          cudaq::optimizer &optimizer, const int n_params,
                          const std::size_t shots) {}
 
@@ -178,8 +182,8 @@ public:
                const std::vector<void *> &rawArgs) = 0;
 
   /// Launch the kernel with given name and argument arrays.
-  // This is intended for remote QPUs whereby we need to JIT-compile the kernel
-  // with argument synthesis. Remote QPU implementation to override this.
+  // This is intended for any QPUs whereby we need to JIT-compile the kernel
+  // with argument synthesis. The QPU implementation must override this.
   virtual void launchKernel(const std::string &name,
                             const std::vector<void *> &rawArgs) {
     if (!isRemote())
@@ -187,12 +191,6 @@ public:
                                "kernel in streamlined for JIT mode on local "
                                "simulated QPU. This is not supported.");
   }
-
-  /// Launch serialized code for remote execution. Subtypes that support this
-  /// should override this function.
-  virtual void launchSerializedCodeExecution(
-      const std::string &name,
-      cudaq::SerializedCodeExecutionContext &serializeCodeExecutionObject) {}
 
   /// @brief Notify the QPU that a new random seed value is set.
   /// By default do nothing, let subclasses override.

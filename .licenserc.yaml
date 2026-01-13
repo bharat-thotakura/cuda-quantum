@@ -5,7 +5,7 @@ header:
     software-name: CUDA-Q
 
     content: |
-      Copyright (c) 2023 - 2024 NVIDIA Corporation & Affiliates.
+      Copyright (c) 2023 - 2026 NVIDIA Corporation & Affiliates.
       All rights reserved.
 
       This source code and the accompanying materials are made available under
@@ -38,7 +38,10 @@ header:
     - 'docs/sphinx/_templates'
     - 'docs/sphinx/_static/cuda_quantum_icon.svg'
     - 'docker/test/installer/mpi_cuda_check.cpp'
+    - 'include/cudaq/Optimizer/CodeGen/OptUtils.h'
+    - 'lib/Optimizer/CodeGen/OptUtils.cpp'
     - 'runtime/cudaq/algorithms/optimizers/nlopt/nlopt-src'
+    - 'python/metapackages/MANIFEST.in'
 
   comment: on-failure
 

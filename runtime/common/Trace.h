@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -13,6 +13,8 @@
 #include <vector>
 
 namespace cudaq {
+
+struct QuditInfo;
 
 /// @brief A trace is a circuit representation of the executed computation, as
 /// seen by the execution manager. (Here, a circuit is represented as a list

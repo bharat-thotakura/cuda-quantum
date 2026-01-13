@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -48,6 +48,18 @@ backing_mod = llvm.parse_assembly("")
 engine = llvm.create_mcjit_compiler(backing_mod, targetMachine)
 
 
+def getNumRequiredQubits(function):
+    for a in function.attributes:
+        if "required_num_qubits" in str(a):
+            return int(
+                str(a).split(f'required_num_qubits\"=')[-1].split(" ")
+                [0].replace("\"", "").replace("'", ""))
+        elif "requiredQubits" in str(a):
+            return int(
+                str(a).split(f'requiredQubits\"=')[-1].split(" ")[0].replace(
+                    "\"", "").replace("'", ""))
+
+
 def getKernelFunction(module):
     for f in module.functions:
         if not f.is_declaration:
@@ -60,7 +72,7 @@ def getNumRequiredQubits(function):
         if "requiredQubits" in str(a):
             return int(
                 str(a).split("requiredQubits\"=")[-1].split(" ")[0].replace(
-                    "\"", ""))
+                    "\"", "").replace("'", ""))
 
 
 # Here we test that the login endpoint works

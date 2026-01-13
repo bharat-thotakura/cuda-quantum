@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -108,7 +108,7 @@ static cl::list<std::string>
 
 static cl::opt<std::string> stdCpp(
     "std",
-    cl::desc("Specify the C++ standard (c++17, c++20). The default is c++20."),
+    cl::desc("Specify the C++ standard (c++20, c++23). The default is c++20."),
     cl::init("c++20"));
 
 inline bool isStdinInput(StringRef str) { return str == "-"; }
@@ -143,14 +143,14 @@ public:
       (c->*fun)(arg);
   }
   void HandleTranslationUnit(clang::ASTContext &ctxt) override {
-    applyConsumers(&clang::ASTConsumer::HandleTranslationUnit, std::move(ctxt));
+    applyConsumers(&clang::ASTConsumer::HandleTranslationUnit, ctxt);
   }
   void HandleCXXStaticMemberVarInstantiation(clang::VarDecl *VD) override {
     applyConsumers(&clang::ASTConsumer::HandleCXXStaticMemberVarInstantiation,
                    std::move(VD));
   }
   void Initialize(clang::ASTContext &Ctx) override {
-    applyConsumers(&clang::ASTConsumer::Initialize, std::move(Ctx));
+    applyConsumers(&clang::ASTConsumer::Initialize, Ctx);
   }
   bool HandleTopLevelDecl(clang::DeclGroupRef D) override {
     bool result = true;

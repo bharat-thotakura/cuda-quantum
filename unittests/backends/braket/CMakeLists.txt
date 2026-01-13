@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -19,7 +19,7 @@ target_link_libraries(test_braket
   cudaq-builder
   cudaq-mlir-runtime
   cudaq-rest-qpu
-  cudaq-spin 
+  cudaq-operator
   nvqir nvqir-qpp
   cudaq-platform-default 
   gtest_main)

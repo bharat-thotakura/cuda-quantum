@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -80,7 +80,7 @@ private:
   void *toOpaque(Value v) const { return v.getAsOpaquePointer(); }
 
   void insertBlockArgumentToEqClass(Value v) {
-    if (auto arg = v.dyn_cast_or_null<BlockArgument>()) {
+    if (auto arg = dyn_cast_or_null<BlockArgument>(v)) {
       auto *block = arg.getOwner();
       auto argNum = arg.getArgNumber();
       for (auto *pred : block->getPredecessors()) {

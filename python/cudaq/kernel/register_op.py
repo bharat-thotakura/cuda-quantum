@@ -1,19 +1,19 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-from functools import partialmethod
 import math
 import numpy as np
+from functools import partialmethod
 from typing import Callable, List
 
-from .utils import globalRegisteredOperations
+from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
 from .kernel_builder import PyKernel, __generalCustomOperation
-from ..mlir._mlir_libs._quakeDialects import cudaq_runtime
+from .utils import globalRegisteredOperations
 
 
 def register_operation(operation_name: str, unitary):

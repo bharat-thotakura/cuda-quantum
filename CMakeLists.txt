@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -70,7 +70,7 @@ endif()
 # Project globals
 # ==============================================================================
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED on)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
 # Set warnings as errors by default. 
@@ -96,6 +96,21 @@ endif()
 # Enable Amazon Braket backends by default.
 if (NOT DEFINED CUDAQ_ENABLE_BRAKET_BACKEND)
   set(CUDAQ_ENABLE_BRAKET_BACKEND ON CACHE BOOL "Enable building AWS SDK for Amazon Braket backends.")
+endif()
+
+# Enable Pasqal target by default.
+if (NOT DEFINED CUDAQ_ENABLE_PASQAL_BACKEND)
+  set(CUDAQ_ENABLE_PASQAL_BACKEND ON CACHE BOOL "Enable building the Pasqal target.")
+endif()
+
+# Enable Quantum Circuits, Inc. (QCI) target by default.
+if (NOT DEFINED CUDAQ_ENABLE_QCI_BACKEND)
+  set(CUDAQ_ENABLE_QCI_BACKEND ON CACHE BOOL "Enable building the Quantum Circuits, Inc. target.")
+endif()
+
+# Enable Quantum Machines target by default.
+if (NOT DEFINED CUDAQ_ENABLE_QUANTUM_MACHINES_BACKEND)
+  set(CUDAQ_ENABLE_QUANTUM_MACHINES_BACKEND ON CACHE BOOL "Enable building the Quantum Machines target.")
 endif()
 
 # Generate a CompilationDatabase (compile_commands.json file) for our build,
@@ -150,6 +165,9 @@ if(NOT CUSTATEVEC_ROOT)
 endif()
 if(NOT CUTENSORNET_ROOT)
   SET(CUTENSORNET_ROOT "$ENV{CUQUANTUM_INSTALL_PREFIX}")
+endif()
+if(NOT CUDENSITYMAT_ROOT)
+  SET(CUDENSITYMAT_ROOT "$ENV{CUQUANTUM_INSTALL_PREFIX}")
 endif()
 if(NOT CUTENSOR_ROOT)
   SET(CUTENSOR_ROOT "$ENV{CUTENSOR_INSTALL_PREFIX}")
@@ -519,15 +537,24 @@ endfunction()
 
 if(CMAKE_CUDA_COMPILER)
   if (NOT CUDA_TARGET_ARCHS)
-    # Volta, Ampere, Hopper
-    set(CUDA_TARGET_ARCHS  "70;80;90")
+    find_package(CUDAToolkit REQUIRED)
+
+    message(STATUS "Found CUDA Toolkit version: ${CUDAToolkit_VERSION}")
+
+    if (CUDAToolkit_VERSION VERSION_LESS 13.0)
+      # Turing, Ampere, Hopper
+      set(CUDA_TARGET_ARCHS  "75;80;90")
+    else()
+      # Turing, Ampere, Hopper, Blackwell
+      set(CUDA_TARGET_ARCHS  "75;80;90;100")
+    endif()
   endif()
   CUDA_get_gencode_args(CUDA_gencode_flags ${CUDA_TARGET_ARCHS})
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -shared -std=c++17 ${CUDA_gencode_flags} --compiler-options -fPIC")
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -shared -std=c++20 ${CUDA_gencode_flags} --compiler-options -fPIC")
 
   enable_language(CUDA)
   set(CUDA_FOUND TRUE)
-  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED TRUE)
   message(STATUS "Cuda language found.")
 endif()
@@ -553,6 +580,10 @@ if (NOT CUDAQ_DISABLE_RUNTIME)
 endif()
 add_subdirectory(tools)
 add_subdirectory(utils)
+
+if(CUDAQ_BUILD_TESTS)
+  enable_testing()
+endif()
 
 if (CUDAQ_ENABLE_PYTHON)
   find_package(Python 3 COMPONENTS Interpreter Development)

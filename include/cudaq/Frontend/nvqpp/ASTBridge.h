@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -230,6 +230,8 @@ public:
   // Stmt nodes to lower to Quake.
   //===--------------------------------------------------------------------===//
 
+  bool TraverseDeclStmt(clang::DeclStmt *x, DataRecursionQueue *q = nullptr);
+
   bool VisitBreakStmt(clang::BreakStmt *x);
   bool TraverseCompoundStmt(clang::CompoundStmt *x,
                             DataRecursionQueue *q = nullptr);
@@ -280,6 +282,8 @@ public:
 
   bool VisitArraySubscriptExpr(clang::ArraySubscriptExpr *x);
   bool VisitBinaryOperator(clang::BinaryOperator *x);
+  bool visitMathLibFunc(clang::CallExpr *x, clang::FunctionDecl *func,
+                        mlir::Location loc, llvm::StringRef funcName);
   bool VisitCallExpr(clang::CallExpr *x);
   bool TraverseCXXConstructExpr(clang::CXXConstructExpr *x,
                                 DataRecursionQueue *q = nullptr);
@@ -339,11 +343,16 @@ public:
 
   bool VisitInitListExpr(clang::InitListExpr *x);
   bool VisitIntegerLiteral(clang::IntegerLiteral *x);
+  bool VisitCharacterLiteral(clang::CharacterLiteral *x);
   bool VisitCXXBoolLiteralExpr(clang::CXXBoolLiteralExpr *x);
   bool VisitMaterializeTemporaryExpr(clang::MaterializeTemporaryExpr *x);
   bool VisitUnaryOperator(clang::UnaryOperator *x);
   bool VisitStringLiteral(clang::StringLiteral *x);
   bool VisitCXXScalarValueInitExpr(clang::CXXScalarValueInitExpr *x);
+  bool VisitUnaryExprOrTypeTraitExpr(clang::UnaryExprOrTypeTraitExpr *x);
+
+  bool TraverseCXXDefaultArgExpr(clang::CXXDefaultArgExpr *x,
+                                 DataRecursionQueue *q = nullptr);
 
   bool TraverseMemberExpr(clang::MemberExpr *x,
                           DataRecursionQueue *q = nullptr);
@@ -443,13 +452,19 @@ public:
   mlir::Value floatingPointCoercion(mlir::Location loc, mlir::Type toType,
                                     mlir::Value value);
 
+  mlir::SmallVector<mlir::Value>
+  convertKernelArgs(mlir::Location loc, std::size_t dropFrontNum,
+                    const mlir::SmallVector<mlir::Value> &args,
+                    mlir::ArrayRef<mlir::Type> kernelArgTys,
+                    clang::CallExpr *x);
+
   /// Load the value referenced by an addressable value, if \p val is an address
   /// type. Otherwise, just returns \p val.
   mlir::Value loadLValue(mlir::Value val) {
     auto valTy = val.getType();
-    if (valTy.isa<cudaq::cc::PointerType>())
+    if (isa<cudaq::cc::PointerType>(valTy))
       return builder.create<cudaq::cc::LoadOp>(val.getLoc(), val);
-    if (valTy.isa<mlir::LLVM::LLVMPointerType>())
+    if (isa<mlir::LLVM::LLVMPointerType>(valTy))
       return builder.create<mlir::LLVM::LoadOp>(val.getLoc(), val);
     return val;
   }
@@ -622,6 +637,9 @@ private:
   /// Stack of Types built by the visitor. (right-to-left ordering)
   llvm::SmallVector<mlir::Type> typeStack;
   llvm::DenseMap<clang::RecordType *, mlir::Type> records;
+  // Certain productions, such as template functions, may need to traverse and
+  // store an extra type, such as an argument.
+  mlir::Type extraType;
 
   // State Flags
   const bool tuplesAreReversed : 1;
@@ -707,8 +725,8 @@ public:
     /// pipelines which erase private declarations.
     void addFunctionDecl(const clang::FunctionDecl *funcDecl,
                          details::QuakeBridgeVisitor &visitor,
-                         mlir::FunctionType funcTy,
-                         mlir::StringRef devFuncName);
+                         mlir::FunctionType funcTy, mlir::StringRef devFuncName,
+                         bool isDecl);
 
   public:
     ASTBridgeConsumer(clang::CompilerInstance &compiler,

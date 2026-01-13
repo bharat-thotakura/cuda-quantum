@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -24,6 +24,7 @@ link_directories(${CMAKE_BINARY_DIR}/lib)
 target_link_libraries(${TEST_NAME}
   PUBLIC
     cudaq-mlir-runtime
+    cudaq
 )
 
 set_property(TARGET ${TEST_NAME} PROPERTY FOLDER test)

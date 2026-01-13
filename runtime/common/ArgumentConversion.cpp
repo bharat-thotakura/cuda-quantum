@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,12 +7,13 @@
  ******************************************************************************/
 
 #include "ArgumentConversion.h"
+#include "common/DeviceCodeRegistry.h"
 #include "cudaq.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
 #include "cudaq/Optimizer/Builder/Runtime.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Todo.h"
 #include "cudaq/qis/pauli_word.h"
-#include "cudaq/utils/registry.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
@@ -91,19 +92,265 @@ static Value genConstant(OpBuilder &builder, const std::string &v,
 }
 
 // Forward declare aggregate type builder as they can be recursive.
-static Value genConstant(OpBuilder &, cudaq::cc::StdvecType, void *,
-                         ModuleOp substMod, llvm::DataLayout &);
-static Value genConstant(OpBuilder &, cudaq::cc::StructType, void *,
-                         ModuleOp substMod, llvm::DataLayout &);
-static Value genConstant(OpBuilder &, cudaq::cc::ArrayType, void *,
-                         ModuleOp substMod, llvm::DataLayout &);
+static Value genRecursiveSpan(OpBuilder &, cudaq::cc::StdvecType, void *,
+                              ModuleOp, llvm::DataLayout &);
+static Value genConstant(OpBuilder &, cudaq::cc::StdvecType, void *, ModuleOp,
+                         llvm::DataLayout &);
+static Value genConstant(OpBuilder &, cudaq::cc::StructType, void *, ModuleOp,
+                         llvm::DataLayout &);
+static Value genConstant(OpBuilder &, cudaq::cc::ArrayType, void *, ModuleOp,
+                         llvm::DataLayout &);
+
+/// Create callee.init_N that initializes the state
+///
+// clang-format off
+/// Callee (the kernel captured by state):
+/// func.func @callee(%arg0: i64) {
+///   %2 = quake.alloca !quake.veq<?>[%arg0 : i64]
+///   %3 = quake.extract_ref %2[1] : (!quake.veq<?>) -> !quake.ref
+///   quake.x %3 : (!quake.ref) -> ()
+///   return
+/// }
+///
+/// callee.init_N:
+/// func.func private @callee.init_0(%arg0: !quake.veq<?>, %arg0: i64) ->
+/// !!quake.veq<?> {
+///   %1 = quake.extract_ref %arg0[1] : (!quake.veq<2>) -> !quake.ref
+///   quake.x %1 : (f64, !quake.ref) -> ()
+///   return %arg0: !quake.veq<?>
+/// }
+// clang-format on
+static void createInitFunc(OpBuilder &builder, ModuleOp moduleOp,
+                           func::FuncOp calleeFunc, StringRef initKernelName) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(moduleOp.getBody());
+
+  auto ctx = builder.getContext();
+  auto initFunc = cast<func::FuncOp>(builder.clone(*calleeFunc));
+  auto loc = initFunc.getLoc();
+
+  auto argTypes = calleeFunc.getArgumentTypes();
+  auto retTy = quake::VeqType::getUnsized(ctx);
+  auto funcTy = FunctionType::get(ctx, argTypes, TypeRange{retTy});
+
+  initFunc.setName(initKernelName);
+  initFunc.setType(funcTy);
+  initFunc.setPrivate();
+
+  OpBuilder newBuilder(ctx);
+
+  auto *entryBlock = &initFunc.getRegion().front();
+  newBuilder.setInsertionPointToStart(entryBlock);
+  Value zero = newBuilder.create<arith::ConstantIntOp>(loc, 0, 64);
+  Value one = newBuilder.create<arith::ConstantIntOp>(loc, 1, 64);
+  Value begin = zero;
+
+  auto argPos = initFunc.getArguments().size();
+
+  // Detect errors in kernel passed to get_state.
+  std::function<void(Block &)> processInner = [&](Block &block) {
+    for (auto &op : block) {
+      for (auto &region : op.getRegions())
+        for (auto &b : region)
+          processInner(b);
+
+      // Don't allow returns in inner scopes
+      if (auto retOp = dyn_cast<func::ReturnOp>(&op))
+        calleeFunc.emitError("Encountered return in inner scope in a kernel "
+                             "passed to get_state");
+    }
+  };
+
+  for (auto &op : calleeFunc.getRegion().front())
+    for (auto &region : op.getRegions())
+      for (auto &b : region)
+        processInner(b);
+
+  // Process outer block to initialize the allocation passed as an argument.
+  std::function<void(Block &)> process = [&](Block &block) {
+    SmallVector<Operation *> cleanUps;
+    Operation *replacedReturn = nullptr;
+
+    Value arg;
+    Value subArg;
+    Value blockBegin = begin;
+    Value blockAllocSize = zero;
+    for (auto &op : block) {
+      if (auto alloc = dyn_cast<quake::AllocaOp>(&op)) {
+        newBuilder.setInsertionPointAfter(alloc);
+
+        if (!arg) {
+          initFunc.insertArgument(argPos, retTy, {}, loc);
+          arg = initFunc.getArgument(argPos);
+        }
+
+        auto allocSize = alloc.getSize();
+        if (!allocSize)
+          allocSize = newBuilder.create<arith::ConstantIntOp>(
+              loc, quake::getAllocationSize(alloc.getType()), 64);
+
+        auto offset = newBuilder.create<arith::SubIOp>(loc, allocSize, one);
+        subArg =
+            newBuilder.create<quake::SubVeqOp>(loc, retTy, arg, begin, offset);
+        alloc.replaceAllUsesWith(subArg);
+        cleanUps.push_back(alloc);
+        begin = newBuilder.create<arith::AddIOp>(loc, begin, allocSize);
+        blockAllocSize =
+            newBuilder.create<arith::AddIOp>(loc, blockAllocSize, allocSize);
+      }
+
+      if (auto retOp = dyn_cast<func::ReturnOp>(&op)) {
+        if (retOp != replacedReturn) {
+          newBuilder.setInsertionPointAfter(retOp);
+
+          auto offset =
+              newBuilder.create<arith::SubIOp>(loc, blockAllocSize, one);
+          Value ret = newBuilder.create<quake::SubVeqOp>(loc, retTy, arg,
+                                                         blockBegin, offset);
+
+          assert(arg && "No veq allocations found");
+          replacedReturn = newBuilder.create<func::ReturnOp>(loc, ret);
+          cleanUps.push_back(retOp);
+        }
+      }
+    }
+
+    for (auto &op : cleanUps) {
+      op->dropAllReferences();
+      op->dropAllUses();
+      op->erase();
+    }
+  };
+
+  // Process the function body
+  process(initFunc.getRegion().front());
+}
+
+/// Create callee.num_qubits_N that calculates the number of qubits to
+/// initialize the state
+///
+// clang-format off
+/// Callee: (the kernel captured by state):
+/// func.func @callee(%arg0: i64) {
+///   %2 = quake.alloca !quake.veq<?>[%arg0 : i64]
+///   %3 = quake.extract_ref %2[1] : (!quake.veq<?>) -> !quake.ref
+///   quake.x %3 : (!quake.ref) -> ()
+///   return
+/// }
+///
+/// callee.num_qubits_0:
+/// func.func private @callee.num_qubits_0(%arg0: i64) -> i64 {
+///   return %arg0 : i64
+/// }
+// clang-format on
+static void createNumQubitsFunc(OpBuilder &builder, ModuleOp moduleOp,
+                                func::FuncOp calleeFunc,
+                                StringRef numQubitsKernelName) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(moduleOp.getBody());
+
+  auto ctx = builder.getContext();
+  auto numQubitsFunc = cast<func::FuncOp>(builder.clone(*calleeFunc));
+  auto loc = numQubitsFunc.getLoc();
+
+  auto argTypes = calleeFunc.getArgumentTypes();
+  auto retType = builder.getI64Type();
+  auto funcTy = FunctionType::get(ctx, argTypes, TypeRange{retType});
+
+  numQubitsFunc.setName(numQubitsKernelName);
+  numQubitsFunc.setType(funcTy);
+  numQubitsFunc.setPrivate();
+
+  OpBuilder newBuilder(ctx);
+
+  auto *entryBlock = &numQubitsFunc.getRegion().front();
+  newBuilder.setInsertionPointToStart(entryBlock);
+  Value size = newBuilder.create<arith::ConstantIntOp>(loc, 0, retType);
+
+  // Process block recursively to calculate and return allocation size
+  // and remove everything else.
+  std::function<void(Block &)> process = [&](Block &block) {
+    SmallVector<Operation *> used;
+    Operation *replacedReturn = nullptr;
+
+    for (auto &op : block) {
+      // Calculate allocation size (existing allocation size plus new one)
+      if (auto alloc = dyn_cast<quake::AllocaOp>(&op)) {
+        auto allocSize = alloc.getSize();
+        if (!allocSize)
+          allocSize = newBuilder.create<arith::ConstantIntOp>(
+              loc, quake::getAllocationSize(alloc.getType()), 64);
+        newBuilder.setInsertionPointAfter(alloc);
+        size = newBuilder.create<arith::AddIOp>(loc, size, allocSize);
+      }
+
+      // Return allocation size
+      if (auto retOp = dyn_cast<func::ReturnOp>(&op)) {
+        if (retOp != replacedReturn) {
+
+          newBuilder.setInsertionPointAfter(retOp);
+          auto newRet = newBuilder.create<func::ReturnOp>(loc, size);
+          replacedReturn = newRet;
+          used.push_back(newRet);
+        }
+      }
+    }
+
+    // Collect all ops needed for size calculation
+    SmallVector<Operation *> keep;
+    while (!used.empty()) {
+      auto *op = used.pop_back_val();
+      if (std::find(keep.begin(), keep.end(), op) != keep.end())
+        continue;
+
+      keep.push_back(op);
+
+      // Collect ops creating operands used in ops we already collected
+      for (auto opnd : op->getOperands())
+        if (auto defOp = opnd.getDefiningOp())
+          used.push_back(defOp);
+
+      // Collect ops that store into memory used in ops we already collected.
+      for (auto user : op->getUsers())
+        if (auto iface = dyn_cast<MemoryEffectOpInterface>(user))
+          if (iface.hasEffect<MemoryEffects::Write>() &&
+              !iface.hasEffect<MemoryEffects::Allocate>())
+            used.push_back(user);
+    }
+
+    // Remove the rest of the ops
+    SmallVector<Operation *> toErase;
+    for (auto &op : block)
+      if (std::find(keep.begin(), keep.end(), &op) == keep.end())
+        toErase.push_back(&op);
+
+    for (auto &op : toErase) {
+      op->dropAllReferences();
+      op->dropAllUses();
+      op->erase();
+    }
+  };
+
+  // Process the function body
+  process(numQubitsFunc.getRegion().front());
+}
 
 static Value genConstant(OpBuilder &builder, const cudaq::state *v,
-                         ModuleOp substMod, llvm::DataLayout &layout,
-                         llvm::StringRef kernelName, bool isSimulator) {
-  if (isSimulator) {
-    // The program is executed remotely, materialize the simulation data
-    // into an array and create a new state from it.
+                         llvm::DataLayout &layout, StringRef kernelName,
+                         ModuleOp substMod,
+                         cudaq::opt::ArgumentConverter &converter) {
+  auto simState =
+      cudaq::state_helper::getSimulationState(const_cast<cudaq::state *>(v));
+
+  // If the state has amplitude data, we materialize the data as a state
+  // vector and create a new state from it.
+  if (simState->hasData()) {
+    // The call below might cause lazy execution of the state kernel.
+    // TODO: For lazy execution scenario on remote simulators, we have the
+    // kernel info available on the state as well, before we needed to run
+    // the state kernel and compute its data, which might cause significant
+    // data transfer). Investigate if it is more performant to use the other
+    // synthesis option in that case (see the next `if`).
     auto numQubits = v->get_num_qubits();
 
     // We currently only synthesize small states.
@@ -132,38 +379,166 @@ static Value genConstant(OpBuilder &builder, const cudaq::state *v,
       std::string name =
           kernelName.str() + ".rodata_synth_" + std::to_string(counter++);
       irBuilder.genVectorOfConstants(loc, substMod, name, vec);
-      auto conGlobal = builder.create<cudaq::cc::AddressOfOp>(loc, ptrTy, name);
-      return builder.create<cudaq::cc::LoadOp>(loc, arrTy, conGlobal);
+      return builder.create<cudaq::cc::AddressOfOp>(loc, ptrTy, name);
     };
 
-    auto conArr = is64Bit ? genConArray.template operator()<double>()
+    auto buffer = is64Bit ? genConArray.template operator()<double>()
                           : genConArray.template operator()<float>();
 
-    auto createState = is64Bit ? cudaq::createCudaqStateFromDataFP64
-                               : cudaq::createCudaqStateFromDataFP32;
-    auto result = irBuilder.loadIntrinsic(substMod, createState);
-    assert(succeeded(result) && "loading intrinsic should never fail");
-
     auto arrSize = builder.create<arith::ConstantIntOp>(loc, size, 64);
-    auto stateTy = cudaq::cc::StateType::get(ctx);
+    auto stateTy = quake::StateType::get(ctx);
     auto statePtrTy = cudaq::cc::PointerType::get(stateTy);
-    auto i8PtrTy = cudaq::cc::PointerType::get(builder.getI8Type());
-    auto buffer = builder.create<cudaq::cc::AllocaOp>(loc, arrTy);
-    builder.create<cudaq::cc::StoreOp>(loc, conArr, buffer);
 
-    auto cast = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, buffer);
-    auto statePtr = builder
-                        .create<func::CallOp>(loc, statePtrTy, createState,
-                                              ValueRange{cast, arrSize})
-                        .getResult(0);
-
-    // TODO: Delete the new state before function exit.
-    return builder.create<cudaq::cc::CastOp>(loc, statePtrTy, statePtr);
+    return builder.create<quake::CreateStateOp>(loc, statePtrTy, buffer,
+                                                arrSize);
   }
-  // The program is executed on quantum hardware, state data is not
-  // available and needs to be regenerated.
-  TODO("cudaq::state* argument synthesis for quantum hardware");
+  // Otherwise (ie quantum hardware, where getting the amplitude data is not
+  // efficient) we aim at replacing states with calls to kernels (`callees`)
+  // that generated them. This is done in three stages:
+  //
+  // 1) (done here) Generate @callee.num_qubits_0 @callee.init_0` for the callee
+  //    function and its arguments stored in a state.
+
+  //    Create two functions:
+  //      - callee.num_qubits_N
+  //        Calculates the number of qubits needed for the veq allocation
+  //      - callee.init_N
+  //        Initializes the veq passed as a parameter
+  //
+  // 2) (done here) Replace the state with
+  //   `quake.get_state @callee.num_qubits_0 @callee.init_0`:
+  //
+  // clang-format off
+  // ```
+  // func.func @caller(%arg0: !cc.ptr<!quake.state>) {
+  //   %1 = quake.get_number_of_qubits %arg0: (!cc.ptr<!quake.state>) -> i64
+  //   %2 = quake.alloca !quake.veq<?>[%1 : i64]
+  //   %3 = quake.init_state %2, %arg0 : (!quake.veq<?>, !cc.ptr<!quake.state>) -> !quake.veq<?>
+  //   return
+  // }
+  //
+  // func.func private @callee(%arg0: i64) {
+  //   %0 = quake.alloca !quake.veq<?>[%arg0 : i64]
+  //   %1 = quake.extract_ref %0[0] : (!quake.veq<2>) -> !quake.ref
+  //   quake.x %1 : (!quake.ref) -> ()
+  //   return
+  // }
+  //
+  // Call from the user host code:
+  // state = cudaq.get_state(callee, 2)
+  // counts = cudaq.sample(caller, state)
+  // ```
+  // clang-format on
+  //
+  // => after argument synthesis:
+  //
+  // clang-format off
+  // ```
+  // func.func @caller() {
+  //   %0 = quake.get_state @callee.num_qubits_0 @callee.init_state_0 : !cc.ptr<!quake.state>
+  //   %1 = quake.get_number_of_qubits %0 : (!cc.ptr<!quake.state>) -> i64
+  //   %2 = quake.alloca !quake.veq<?>[%1 : i64]
+  //   %3 = quake.init_state %2, %0 : (!quake.veq<?>, !cc.ptr<!quake.state>) -> !quake.veq<?>
+  //   return
+  // }
+  //
+  // func.func private @callee.num_qubits_0(%arg0: i64) -> i64 {
+  //   return %arg0 : i64
+  // }
+  //
+  // func.func private @callee.init_0(%arg0: i64, %arg1: !quake.veq<?>) {
+  //   %1 = quake.extract_ref %arg0[0] : (!quake.veq<2>) -> !quake.ref
+  //   quake.x %1 : (f64, !quake.ref) -> ()
+  //   return
+  // }
+  // ```
+  // clang-format on
+  //
+  // 3) (done in ReplaceStateWithKernel) Replace the `quake.get_state` and ops
+  // that use its state with calls to the generated functions, synthesized with
+  // the arguments used to create the original state:
+  //
+  // After ReplaceStateWithKernel pass:
+  //
+  // clang-format off
+  // ```
+  // func.func @caller() {
+  //   %1 = call callee.num_qubits_0() : () -> i64
+  //   %2 = quake.alloca !quake.veq<?>[%1 : i64]
+  //   %3 = call @callee.init_0(%2): (!quake.veq<?>) -> !quake.veq<?>
+  // }
+  //
+  // func.func private @callee.num_qubits_0() -> i64 {
+  //   %cst = arith.constant 2 : i64
+  //   return %cst : i64
+  // }
+  //
+  // func.func private @callee.init_0(%arg0: !quake.veq<?>): !quake.veq<?> {
+  //   %cst = arith.constant 1.5707963267948966 : f64
+  //   %1 = quake.extract_ref %arg0[0] : (!quake.veq<2>) -> !quake.ref
+  //   quake.ry (%cst) %1 : (f64, !quake.ref) -> ()
+  //   return %arg0
+  // }
+  // ```
+  // clang-format on
+
+  if (simState->getKernelInfo().has_value()) {
+    auto [calleeName, calleeArgs] = simState->getKernelInfo().value();
+
+    std::string calleeKernelName =
+        cudaq::runtime::cudaqGenPrefixName + calleeName;
+
+    auto ctx = builder.getContext();
+    auto loc = builder.getUnknownLoc();
+
+    auto code = cudaq::get_quake_by_name(calleeName, /*throwException=*/false);
+    assert(!code.empty() && "Quake code not found for callee");
+    auto fromModule = parseSourceString<ModuleOp>(code, ctx);
+
+    auto calleeFunc = fromModule->lookupSymbol<func::FuncOp>(calleeKernelName);
+    assert(calleeFunc && "callee func is missing");
+
+    // Use the state pointer as hash to look up the function name
+    // that was created using the same hash in StateAggregator.
+    auto hash = std::to_string(reinterpret_cast<std::size_t>(v));
+    auto initName = calleeName + ".init_" + hash;
+    auto numQubitsName = calleeName + ".num_qubits_" + hash;
+    auto initKernelName = cudaq::runtime::cudaqGenPrefixName + initName;
+    auto numQubitsKernelName =
+        cudaq::runtime::cudaqGenPrefixName + numQubitsName;
+
+    // Create `callee.init_N` and `callee.num_qubits_N` used to replace
+    // `quake.materialize_state` in ReplaceStateWithKernel pass
+    if (!converter.isRegisteredKernel(initName) ||
+        !converter.isRegisteredKernel(numQubitsName)) {
+      createInitFunc(builder, substMod, calleeFunc, initKernelName);
+      createNumQubitsFunc(builder, substMod, calleeFunc, numQubitsKernelName);
+
+      // Convert arguments for `callee.init_N`.
+      auto registeredInitName = converter.registerKernel(initName);
+      converter.gen(registeredInitName, substMod, calleeArgs);
+
+      // Convert arguments for `callee.num_qubits_N`.
+      auto registeredNumQubitsName = converter.registerKernel(numQubitsName);
+      converter.gen(registeredNumQubitsName, substMod, calleeArgs);
+    }
+
+    // Create a substitution for the state pointer.
+    auto statePtrTy = cudaq::cc::PointerType::get(quake::StateType::get(ctx));
+    return builder.create<quake::MaterializeStateOp>(
+        loc, statePtrTy, builder.getStringAttr(numQubitsKernelName),
+        builder.getStringAttr(initKernelName));
+  }
+
+  TODO("cudaq::state* argument synthesis for quantum hardware for c functions");
   return {};
+}
+
+static bool isSupportedRecursiveSpan(cudaq::cc::StdvecType ty) {
+  Type eleTy = ty.getElementType();
+  while (auto ty = dyn_cast<cudaq::cc::SpanLikeType>(eleTy))
+    eleTy = ty.getElementType();
+  return isa<IntegerType, FloatType>(eleTy);
 }
 
 // Recursive step processing of aggregates.
@@ -172,7 +547,8 @@ Value dispatchSubtype(OpBuilder &builder, Type ty, void *p, ModuleOp substMod,
   auto *ctx = builder.getContext();
   return TypeSwitch<Type, Value>(ty)
       .Case([&](IntegerType intTy) -> Value {
-        switch (intTy.getIntOrFloatBitWidth()) {
+        auto width = intTy.getIntOrFloatBitWidth();
+        switch (width) {
         case 1:
           return genConstant(builder, *static_cast<bool *>(p));
         case 8:
@@ -184,7 +560,8 @@ Value dispatchSubtype(OpBuilder &builder, Type ty, void *p, ModuleOp substMod,
         case 64:
           return genConstant(builder, *static_cast<std::int64_t *>(p));
         default:
-          return {};
+          throw std::runtime_error("unsupported integer width " +
+                                   std::to_string(width));
         }
       })
       .Case([&](Float32Type fltTy) {
@@ -235,8 +612,118 @@ static std::size_t getHostSideElementSize(Type eleTy,
   return cudaq::opt::getDataSize(layout, eleTy);
 }
 
+/// Recursively builds an `ArrayAttr` containing the constants.
+ArrayAttr genRecursiveConstantArray(OpBuilder &builder,
+                                    cudaq::cc::StdvecType vecTy, void *p,
+                                    llvm::DataLayout &layout) {
+  typedef const char *VectorType[3];
+  VectorType *vecPtr = static_cast<VectorType *>(p);
+  auto delta = (*vecPtr)[1] - (*vecPtr)[0];
+  if (!delta)
+    return {};
+  auto eleTy = vecTy.getElementType();
+  unsigned stepBy = 0;
+  std::function<Attribute(char *)> genAttr;
+  if (auto innerTy = dyn_cast<cudaq::cc::StdvecType>(eleTy)) {
+    stepBy = sizeof(VectorType);
+    genAttr = [&](char *p) -> Attribute {
+      return genRecursiveConstantArray(builder, innerTy, p, layout);
+    };
+  } else if (auto stringTy = dyn_cast<cudaq::cc::CharspanType>(eleTy)) {
+    stepBy = sizeof(std::string);
+    genAttr = [=](char *p) -> Attribute {
+      std::string *s = reinterpret_cast<std::string *>(p);
+      return StringAttr::get(eleTy.getContext(), *s);
+    };
+  } else if (auto intTy = dyn_cast<IntegerType>(eleTy)) {
+    unsigned width = intTy.getWidth();
+    stepBy = (width + 7) / 8;
+    genAttr = [=](char *p) -> Attribute {
+      std::uint64_t val = 0;
+      switch (width) {
+      case 1:
+        val = *p != '\0';
+        break;
+      case 8:
+        val = *(reinterpret_cast<std::uint8_t *>(p));
+        break;
+      case 16:
+        val = *(reinterpret_cast<std::uint16_t *>(p));
+        break;
+      case 32:
+        val = *(reinterpret_cast<std::uint32_t *>(p));
+        break;
+      case 64:
+        val = *(reinterpret_cast<std::uint64_t *>(p));
+        break;
+      default:
+        throw std::runtime_error("unsupported integer width " +
+                                 std::to_string(width));
+      }
+      return IntegerAttr::get(intTy, val);
+    };
+  } else if (auto fltTy = dyn_cast<FloatType>(eleTy)) {
+    unsigned width = fltTy.getWidth();
+    stepBy = width / 8;
+    genAttr = [=](char *p) -> Attribute {
+      switch (width) {
+      case 32: {
+        float val = *(reinterpret_cast<float *>(p));
+        return FloatAttr::get(eleTy, APFloat{val});
+      }
+      case 64: {
+        double val = *(reinterpret_cast<double *>(p));
+        return FloatAttr::get(eleTy, APFloat{val});
+      }
+      default:
+        throw std::runtime_error("unsupported floating point width " +
+                                 std::to_string(width));
+      }
+    };
+  } else {
+    return {};
+  }
+  SmallVector<Attribute> members;
+  for (char *item = const_cast<char *>((*vecPtr)[0]); item < (*vecPtr)[1];
+       item += stepBy)
+    members.push_back(genAttr(item));
+  return ArrayAttr::get(builder.getContext(), members);
+}
+
+static Type convertRecursiveSpanType(Type ty) {
+  if (auto vecTy = dyn_cast<cudaq::cc::StdvecType>(ty))
+    return cudaq::cc::ArrayType::get(
+        convertRecursiveSpanType(vecTy.getElementType()));
+  if (auto cspanTy = dyn_cast<cudaq::cc::CharspanType>(ty))
+    return cudaq::cc::ArrayType::get(IntegerType::get(ty.getContext(), 8));
+  return ty;
+}
+
+/// This generates a constant array to be used as an initializer for a
+/// `cc.reify_span` operation. This higher level semantics helps facilitate
+/// constant propagation through the recursive span structure. The reify
+/// operation will be lowered to more primitive ops on an as-needed basis.
+Value genRecursiveSpan(OpBuilder &builder, cudaq::cc::StdvecType ty, void *p,
+                       ModuleOp substMod, llvm::DataLayout &layout) {
+  ArrayAttr constants = genRecursiveConstantArray(builder, ty, p, layout);
+  auto loc = builder.getUnknownLoc();
+  if (!constants) {
+    // Empty vector. Not much to contemplate here.
+    auto zero = builder.create<arith::ConstantIntOp>(loc, 0, 64);
+    auto ptr = builder.create<cudaq::cc::CastOp>(
+        loc, cudaq::cc::PointerType::get(ty.getElementType()), zero);
+    return builder.create<cudaq::cc::StdvecInitOp>(loc, ty, ptr, zero);
+  }
+  auto arrTy = convertRecursiveSpanType(ty);
+  auto conArr =
+      builder.create<cudaq::cc::ConstantArrayOp>(loc, arrTy, constants);
+  return builder.create<cudaq::cc::ReifySpanOp>(loc, ty, conArr);
+}
+
 Value genConstant(OpBuilder &builder, cudaq::cc::StdvecType vecTy, void *p,
                   ModuleOp substMod, llvm::DataLayout &layout) {
+  if (isSupportedRecursiveSpan(vecTy))
+    return genRecursiveSpan(builder, vecTy, p, substMod, layout);
   typedef const char *VectorType[3];
   VectorType *vecPtr = static_cast<VectorType *>(p);
   auto delta = (*vecPtr)[1] - (*vecPtr)[0];
@@ -320,8 +807,7 @@ Value genConstant(OpBuilder &builder, cudaq::cc::IndirectCallableType indCallTy,
   cloneBuilder.setInsertionPointToStart(substMod.getBody());
   for (auto &i : *fromModule->getBody()) {
     auto s = dyn_cast_if_present<SymbolOpInterface>(i);
-    if (!s || sourceMod.lookupSymbol(s.getNameAttr()) ||
-        substMod.lookupSymbol(s.getNameAttr()))
+    if (!s || substMod.lookupSymbol(s.getNameAttr()))
       continue;
     auto clone = cloneBuilder.clone(i);
     cast<SymbolOpInterface>(clone).setPrivate();
@@ -336,19 +822,29 @@ Value genConstant(OpBuilder &builder, cudaq::cc::IndirectCallableType indCallTy,
 //===----------------------------------------------------------------------===//
 
 cudaq::opt::ArgumentConverter::ArgumentConverter(StringRef kernelName,
-                                                 ModuleOp sourceModule,
-                                                 bool isSimulator)
-    : sourceModule(sourceModule), builder(sourceModule.getContext()),
-      kernelName(kernelName), isSimulator(isSimulator) {
-  substModule = builder.create<ModuleOp>(builder.getUnknownLoc());
-}
+                                                 ModuleOp sourceModule)
+    : sourceModule(sourceModule), kernelName(kernelName) {}
 
 void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
-  auto *ctx = builder.getContext();
-  // We should look up the input type signature here.
+  gen(kernelName, sourceModule, arguments);
+}
 
+void cudaq::opt::ArgumentConverter::gen(StringRef kernelName,
+                                        ModuleOp sourceModule,
+                                        const std::vector<void *> &arguments) {
+  auto *ctx = sourceModule.getContext();
+  OpBuilder builder(ctx);
+  ModuleOp substModule =
+      builder.create<mlir::ModuleOp>(builder.getUnknownLoc());
+  auto *kernelInfo = addKernelInfo(kernelName, substModule);
+
+  // We should look up the input type signature here.
   auto fun = sourceModule.lookupSymbol<func::FuncOp>(
       cudaq::runtime::cudaqGenPrefixName + kernelName.str());
+  if (!fun)
+    throw std::runtime_error("missing fun in argument conversion: " +
+                             kernelName.str());
+
   FunctionType fromFuncTy = fun.getFunctionType();
   for (auto iter :
        llvm::enumerate(llvm::zip(fromFuncTy.getInputs(), arguments))) {
@@ -377,7 +873,8 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
     auto subst =
         TypeSwitch<Type, cc::ArgumentSubstitutionOp>(argTy)
             .Case([&](IntegerType intTy) -> cc::ArgumentSubstitutionOp {
-              switch (intTy.getIntOrFloatBitWidth()) {
+              auto width = intTy.getIntOrFloatBitWidth();
+              switch (width) {
               case 1:
                 return buildSubst(*static_cast<bool *>(argPtr));
               case 8:
@@ -389,7 +886,8 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
               case 64:
                 return buildSubst(*static_cast<std::int64_t *>(argPtr));
               default:
-                return {};
+                throw std::runtime_error("unsupported integer width " +
+                                         std::to_string(width));
               }
             })
             .Case([&](Float32Type fltTy) {
@@ -414,10 +912,9 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
                                 substModule);
             })
             .Case([&](cc::PointerType ptrTy) -> cc::ArgumentSubstitutionOp {
-              if (ptrTy.getElementType() == cc::StateType::get(ctx))
+              if (ptrTy.getElementType() == quake::StateType::get(ctx))
                 return buildSubst(static_cast<const state *>(argPtr),
-                                  substModule, dataLayout, kernelName,
-                                  isSimulator);
+                                  dataLayout, kernelName, substModule, *this);
               return {};
             })
             .Case([&](cc::StdvecType ty) {
@@ -435,7 +932,7 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
             })
             .Default({});
     if (subst)
-      substitutions.emplace_back(std::move(subst));
+      kernelInfo->getSubstitutions().emplace_back(std::move(subst));
   }
 }
 

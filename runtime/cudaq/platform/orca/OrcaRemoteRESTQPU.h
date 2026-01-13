@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -78,7 +78,7 @@ public:
 
   /// @brief Enqueue a quantum task on the asynchronous execution queue.
   void enqueue(cudaq::QuantumTask &task) override {
-    cudaq::info("OrcaRemoteRESTQPU: Enqueue Task on QPU {}", qpu_id);
+    CUDAQ_INFO("OrcaRemoteRESTQPU: Enqueue Task on QPU {}", qpu_id);
     execution_queue->enqueue(task);
   }
 
@@ -87,6 +87,9 @@ public:
 
   /// @brief Return true if the current backend supports conditional feedback
   bool supportsConditionalFeedback() override { return false; }
+
+  /// @brief Return true if the current backend supports explicit measurements
+  bool supportsExplicitMeasurements() override { return false; }
 
   /// @brief Provide the number of shots
   void setShots(int _nShots) override { nShots = _nShots; }
@@ -99,17 +102,16 @@ public:
 
   /// @brief Store the execution context for launching kernel
   void setExecutionContext(cudaq::ExecutionContext *context) override {
-    cudaq::info("OrcaRemoteRESTQPU::setExecutionContext QPU {}", qpu_id);
+    CUDAQ_INFO("OrcaRemoteRESTQPU::setExecutionContext QPU {}", qpu_id);
     auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
     contexts.emplace(tid, context);
     cudaq::getExecutionManager()->setExecutionContext(contexts[tid]);
   }
 
-  /// @brief Overrides resetExecutionContext to forward to the ExecutionManager
+  /// @brief Overrides resetExecutionContext
   void resetExecutionContext() override {
-    cudaq::info("OrcaRemoteRESTQPU::resetExecutionContext QPU {}", qpu_id);
+    CUDAQ_INFO("OrcaRemoteRESTQPU::resetExecutionContext QPU {}", qpu_id);
     auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    cudaq::getExecutionManager()->resetExecutionContext();
     contexts[tid] = nullptr;
     contexts.erase(tid);
   }

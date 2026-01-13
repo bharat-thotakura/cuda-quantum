@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -9,6 +9,8 @@
 #include "common/BraketExecutor.h"
 #include "common/BraketServerHelper.h"
 
+#include <aws/braket/model/Association.h>
+#include <aws/braket/model/AssociationType.h>
 #include <aws/braket/model/CreateQuantumTaskRequest.h>
 #include <aws/braket/model/GetQuantumTaskRequest.h>
 #include <aws/braket/model/QuantumTaskStatus.h>
@@ -32,13 +34,13 @@ void tryCreateBucket(Aws::S3Crt::S3CrtClient &client, std::string const &region,
             GetBucketLocationConstraintForName(region));
   }
   createReq.SetCreateBucketConfiguration(config);
-  cudaq::info("Attempting to create S3 bucket \"s3://{}\"", bucketName);
+  CUDAQ_INFO("Attempting to create S3 bucket \"s3://{}\"", bucketName);
   auto createResponse = client.CreateBucket(createReq);
   if (!createResponse.IsSuccess()) {
     auto error = createResponse.GetError();
     if (error.GetErrorType() ==
         Aws::S3Crt::S3CrtErrors::BUCKET_ALREADY_OWNED_BY_YOU) {
-      cudaq::info("\"s3://{}\" already exists", bucketName);
+      CUDAQ_INFO("\"s3://{}\" already exists", bucketName);
       return;
     } else if (error.GetErrorType() ==
                Aws::S3Crt::S3CrtErrors::BUCKET_ALREADY_EXISTS) {
@@ -100,7 +102,8 @@ void tryCreateBucket(Aws::S3Crt::S3CrtClient &client, std::string const &region,
 
 namespace cudaq {
 BraketExecutor::BraketExecutor()
-    : api(options), jobToken(std::getenv("AMZN_BRAKET_JOB_TOKEN")) {}
+    : api(options), jobToken(std::getenv("AMZN_BRAKET_JOB_TOKEN")),
+      reservationArn(std::getenv("AMZN_BRAKET_RESERVATION_TIME_WINDOW_ARN")) {}
 
 /// @brief Set the server helper
 void BraketExecutor::setServerHelper(ServerHelper *helper) {
@@ -110,13 +113,23 @@ void BraketExecutor::setServerHelper(ServerHelper *helper) {
       Aws::Utils::ARN(helper->getConfig().at("deviceArn")).GetRegion();
   std::string defaultBucket = helper->getConfig().at("defaultBucket");
 
+  if (helper->getConfig().contains("polling_interval_ms")) {
+    long pollingIntervalMs{
+        std::stol(helper->getConfig().at("polling_interval_ms"))};
+    if (pollingIntervalMs <= 0) {
+      throw std::runtime_error(
+          "polling_interval_ms must be a positive integer.");
+    }
+    pollingInterval = std::chrono::milliseconds{pollingIntervalMs};
+  }
+
   Aws::Client::ClientConfiguration clientConfig;
   clientConfig.verifySSL = false;
   Aws::S3Crt::ClientConfiguration s3ClientConfig;
   s3ClientConfig.verifySSL = false;
   if (!region.empty()) {
     if (region != clientConfig.region) {
-      cudaq::info("Auto-routing to AWS region {}", region);
+      CUDAQ_INFO("Auto-routing to AWS region {}", region);
       clientConfig.region = region;
       s3ClientConfig.region = region;
     }
@@ -141,8 +154,8 @@ void BraketExecutor::setServerHelper(ServerHelper *helper) {
           }
         }
         tryCreateBucket(*s3ClientPtr, region, bucketName);
-        cudaq::info("Braket task results will use S3 bucket \"s3://{}\"",
-                    bucketName);
+        CUDAQ_INFO("Braket task results will use S3 bucket \"s3://{}\"",
+                   bucketName);
         return bucketName;
       }).share();
 }
@@ -154,7 +167,7 @@ ServerJobPayload BraketExecutor::checkHelperAndCreateJob(
   braketServerHelper->setShots(shots);
 
   auto config = braketServerHelper->getConfig();
-  cudaq::info("Backend config: {}, shots {}", config, shots);
+  CUDAQ_INFO("Backend config: {}, shots {}", config, shots);
   config.insert({"shots", std::to_string(shots)});
 
   return braketServerHelper->createJob(codesToExecute);
@@ -174,7 +187,10 @@ void BraketExecutor::setOutputNames(const KernelExecution &codeToExecute,
 
 details::future
 BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
-                        bool isObserve) {
+                        cudaq::details::ExecutionContextType execType,
+                        std::vector<char> *rawOutput) {
+  const bool isObserve =
+      execType == cudaq::details::ExecutionContextType::observe;
   auto [dummy1, dummy2, messages] = checkHelperAndCreateJob(codesToExecute);
 
   std::string const defaultBucket = defaultBucketFuture.get();
@@ -190,6 +206,15 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
     req.SetShots(message["shots"]);
     if (jobToken)
       req.SetJobToken(jobToken);
+
+    if (reservationArn) {
+      Aws::Braket::Model::Association assoc;
+      assoc.SetArn(reservationArn);
+      assoc.SetType(
+          Aws::Braket::Model::AssociationType::RESERVATION_TIME_WINDOW_ARN);
+      req.AddAssociations(std::move(assoc));
+    }
+
     req.SetOutputS3Bucket(defaultBucket);
     req.SetOutputS3KeyPrefix(defaultPrefix);
 
@@ -198,7 +223,7 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
 
   return std::async(
       std::launch::async,
-      [this, codesToExecute](
+      [this, codesToExecute, isObserve](
           std::vector<Aws::Braket::Model::CreateQuantumTaskOutcomeCallable>
               createOutcomes) {
         std::vector<ExecutionResult> results;
@@ -209,7 +234,7 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
           }
           std::string taskArn = createResponse.GetResult().GetQuantumTaskArn();
 
-          cudaq::info("Created Braket quantum task {}", taskArn);
+          CUDAQ_INFO("Created Braket quantum task {}", taskArn);
           setOutputNames(codesToExecute[i], taskArn);
 
           Aws::Braket::Model::GetQuantumTaskRequest req;
@@ -243,9 +268,9 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
           std::string outBucket = getResult.GetOutputS3Bucket();
           std::string outPrefix = getResult.GetOutputS3Directory();
 
-          cudaq::info("Fetching braket quantum task {} results from "
-                      "s3://{}/{}/results.json",
-                      taskArn, outBucket, outPrefix);
+          CUDAQ_INFO("Fetching braket quantum task {} results from "
+                     "s3://{}/{}/results.json",
+                     taskArn, outBucket, outPrefix);
 
           Aws::S3Crt::Model::GetObjectRequest resultsJsonRequest;
           resultsJsonRequest.SetBucket(outBucket);
@@ -259,9 +284,16 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
 
           auto c = serverHelper->processResults(resultsJson, taskArn);
 
-          for (auto &regName : c.register_names()) {
-            results.emplace_back(c.to_map(regName), regName);
-            results.back().sequentialData = c.sequential_data(regName);
+          if (isObserve) {
+            // Use the job name instead of the global register.
+            results.emplace_back(c.to_map(), codesToExecute[i].name);
+            results.back().sequentialData = c.sequential_data();
+          } else {
+            // For each register, add the results into result.
+            for (auto &regName : c.register_names()) {
+              results.emplace_back(c.to_map(regName), regName);
+              results.back().sequentialData = c.sequential_data(regName);
+            }
           }
           i++;
         }

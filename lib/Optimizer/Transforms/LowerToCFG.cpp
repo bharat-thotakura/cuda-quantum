@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,7 +7,8 @@
  ******************************************************************************/
 
 #include "PassDetails.h"
-#include "cudaq/Optimizer/Builder/Factory.h"
+#include "cudaq/Optimizer/Builder/Intrinsics.h"
+#include "cudaq/Optimizer/Builder/Runtime.h"
 #include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
@@ -18,7 +19,15 @@
 
 #define DEBUG_TYPE "lower-to-cfg"
 
+namespace cudaq::opt {
+#define GEN_PASS_DEF_CONVERTTOCFG
+#define GEN_PASS_DEF_CONVERTTOCFGPREP
+#include "cudaq/Optimizer/Transforms/Passes.h.inc"
+} // namespace cudaq::opt
+
 using namespace mlir;
+
+#include "LowerToCFGPatterns.inc"
 
 namespace {
 class RewriteScope : public OpRewritePattern<cudaq::cc::ScopeOp> {
@@ -48,14 +57,10 @@ public:
     auto loc = scopeOp.getLoc();
     auto *initBlock = rewriter.getInsertionBlock();
     Value stacksave;
-    auto module = scopeOp.getOperation()->getParentOfType<ModuleOp>();
     auto ptrTy = cudaq::cc::PointerType::get(rewriter.getI8Type());
     if (scopeOp.hasAllocation(/*quantumAllocs=*/false)) {
-      auto fun = cudaq::opt::factory::createFunction(
-          "llvm.stacksave", ArrayRef<Type>{ptrTy}, {}, module);
-      fun.setPrivate();
       auto call = rewriter.create<func::CallOp>(
-          loc, ptrTy, fun.getSymNameAttr(), ArrayRef<Value>{});
+          loc, ptrTy, cudaq::llvmStackSave, ArrayRef<Value>{});
       stacksave = call.getResult(0);
     }
     auto initPos = rewriter.getInsertionPoint();
@@ -84,10 +89,8 @@ public:
     rewriter.inlineRegionBefore(scopeOp.getInitRegion(), endBlock);
     if (stacksave) {
       rewriter.setInsertionPointToStart(endBlock);
-      auto fun = cudaq::opt::factory::createFunction(
-          "llvm.stackrestore", {}, ArrayRef<Type>{ptrTy}, module);
-      fun.setPrivate();
-      rewriter.create<func::CallOp>(loc, ArrayRef<Type>{}, fun.getSymNameAttr(),
+      rewriter.create<func::CallOp>(loc, ArrayRef<Type>{},
+                                    cudaq::llvmStackRestore,
                                     ArrayRef<Value>{stacksave});
     }
     rewriter.replaceOp(scopeOp, scopeResults);
@@ -278,80 +281,6 @@ public:
   }
 };
 
-class RewriteIf : public OpRewritePattern<cudaq::cc::IfOp> {
-public:
-  using OpRewritePattern::OpRewritePattern;
-
-  /// Rewrites an if construct like
-  /// ```mlir
-  /// (0)
-  /// quake.if %cond {
-  ///   (1)
-  /// } else {
-  ///   (2)
-  /// }
-  /// (3)
-  /// ```
-  /// to a CFG like
-  /// ```mlir
-  ///   (0)
-  ///   cf.cond_br %cond, ^bb1, ^bb2
-  /// ^bb1:
-  ///   (1)
-  ///   cf.br ^bb3
-  /// ^bb2:
-  ///   (2)
-  ///   cf.br ^bb3
-  /// ^bb3:
-  ///   (3)
-  /// ```
-  LogicalResult matchAndRewrite(cudaq::cc::IfOp ifOp,
-                                PatternRewriter &rewriter) const override {
-    auto loc = ifOp.getLoc();
-    auto *initBlock = rewriter.getInsertionBlock();
-    auto initPos = rewriter.getInsertionPoint();
-    auto *endBlock = rewriter.splitBlock(initBlock, initPos);
-    if (ifOp.getNumResults() != 0) {
-      Block *continueBlock = rewriter.createBlock(
-          endBlock, ifOp.getResultTypes(),
-          SmallVector<Location>(ifOp.getNumResults(), loc));
-      rewriter.create<cf::BranchOp>(loc, endBlock);
-      endBlock = continueBlock;
-    }
-    auto *thenBlock = &ifOp.getThenRegion().front();
-    bool hasElse = !ifOp.getElseRegion().empty();
-    auto *elseBlock = hasElse ? &ifOp.getElseRegion().front() : endBlock;
-    updateBodyBranches(&ifOp.getThenRegion(), rewriter, endBlock);
-    updateBodyBranches(&ifOp.getElseRegion(), rewriter, endBlock);
-    rewriter.inlineRegionBefore(ifOp.getThenRegion(), endBlock);
-    if (hasElse)
-      rewriter.inlineRegionBefore(ifOp.getElseRegion(), endBlock);
-    rewriter.setInsertionPointToEnd(initBlock);
-    rewriter.create<cf::CondBranchOp>(loc, ifOp.getCondition(), thenBlock,
-                                      ifOp.getLinearArgs(), elseBlock,
-                                      ifOp.getLinearArgs());
-    rewriter.replaceOp(ifOp, endBlock->getArguments());
-    return success();
-  }
-
-  // Replace all the ContinueOp in the body region with branches to the correct
-  // basic blocks.
-  void updateBodyBranches(Region *bodyRegion, PatternRewriter &rewriter,
-                          Block *continueBlock) const {
-    // Walk body region and replace all continue and break ops.
-    for (Block &block : *bodyRegion) {
-      auto *terminator = block.getTerminator();
-      if (auto cont = dyn_cast<cudaq::cc::ContinueOp>(terminator)) {
-        rewriter.setInsertionPointToEnd(&block);
-        LLVM_DEBUG(llvm::dbgs() << "replacing " << *terminator << '\n');
-        rewriter.replaceOpWithNewOp<cf::BranchOp>(cont, continueBlock,
-                                                  cont.getOperands());
-      }
-      // Other ad-hoc control flow in the region need not be rewritten.
-    }
-  }
-};
-
 class RewriteReturn : public OpRewritePattern<cudaq::cc::ReturnOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -363,12 +292,12 @@ public:
   }
 };
 
-class LowerToCFGPass : public cudaq::opt::LowerToCFGBase<LowerToCFGPass> {
+class ConvertToCFG : public cudaq::opt::impl::ConvertToCFGBase<ConvertToCFG> {
 public:
-  LowerToCFGPass() = default;
+  using ConvertToCFGBase::ConvertToCFGBase;
 
   void runOnOperation() override {
-    auto op = getOperation();
+    auto *op = getOperation();
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     patterns.insert<RewriteLoop, RewriteScope, RewriteIf, RewriteReturn>(ctx);
@@ -378,13 +307,33 @@ public:
                         cudaq::cc::BreakOp, cudaq::cc::ReturnOp>();
     target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
     if (failed(applyPartialConversion(op, target, std::move(patterns)))) {
-      emitError(op.getLoc(), "error converting to CFG\n");
+      emitError(op->getLoc(), "error converting to CFG\n");
+      signalPassFailure();
+    }
+  }
+};
+
+class ConvertToCFGPrep
+    : public cudaq::opt::impl::ConvertToCFGPrepBase<ConvertToCFGPrep> {
+public:
+  using ConvertToCFGPrepBase::ConvertToCFGPrepBase;
+
+  void runOnOperation() override {
+    ModuleOp mod = getOperation();
+    auto irBuilder = cudaq::IRBuilder::atBlockEnd(mod.getBody());
+    if (failed(irBuilder.loadIntrinsic(mod, cudaq::llvmStackSave))) {
+      mod.emitError("could not load llvm.stacksave intrinsic.");
       signalPassFailure();
     }
   }
 };
 } // namespace
 
-std::unique_ptr<Pass> cudaq::opt::createLowerToCFGPass() {
-  return std::make_unique<LowerToCFGPass>();
+void cudaq::opt::addLowerToCFG(OpPassManager &pm) {
+  pm.addPass(cudaq::opt::createConvertToCFGPrep());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createConvertToCFG());
+}
+
+void cudaq::opt::registerToCFGPipeline() {
+  PassPipelineRegistration<>("lower-to-cfg", "Convert to CFG.", addLowerToCFG);
 }

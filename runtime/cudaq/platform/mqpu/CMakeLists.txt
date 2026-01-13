@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -25,7 +25,7 @@ target_include_directories(${LIBRARY_NAME}
 target_link_libraries(${LIBRARY_NAME}
   PUBLIC 
     cudaq-em-default 
-    cudaq-spin 
+    cudaq-operator
     cudaq-common 
   PRIVATE 
     cudaq
@@ -45,4 +45,3 @@ endif()
   
 install(TARGETS ${LIBRARY_NAME} DESTINATION lib)
 add_target_config(remote-mqpu)
-add_target_config(nvqc)

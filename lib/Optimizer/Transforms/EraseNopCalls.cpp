@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -31,7 +31,7 @@ public:
   LogicalResult matchAndRewrite(func::CallOp call,
                                 PatternRewriter &rewriter) const override {
     auto callee = call.getCallee();
-    if (callee.equals(cudaq::stdMoveBuiltin)) {
+    if (callee == cudaq::stdMoveBuiltin) {
       rewriter.replaceOp(call, call.getOperands());
       rewriter.eraseOp(call);
       return success();
@@ -46,14 +46,14 @@ public:
   using EraseNopCallsBase::EraseNopCallsBase;
 
   void runOnOperation() override {
-    func::FuncOp func = getOperation();
-    LLVM_DEBUG(llvm::dbgs() << "Function before erasure:\n" << func << "\n\n");
+    auto *op = getOperation();
+    LLVM_DEBUG(llvm::dbgs() << "Before erasure:\n" << *op << "\n\n");
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     patterns.insert<EraseStdMovePattern>(ctx);
-    if (failed(applyPatternsAndFoldGreedily(func, std::move(patterns))))
+    if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns))))
       signalPassFailure();
-    LLVM_DEBUG(llvm::dbgs() << "Function after erasure:\n" << func << "\n\n");
+    LLVM_DEBUG(llvm::dbgs() << "After erasure:\n" << *op << "\n\n");
   }
 };
 } // namespace

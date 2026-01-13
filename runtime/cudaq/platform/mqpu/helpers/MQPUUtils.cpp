@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -35,10 +35,16 @@ bool portAvailable(int port) {
   int sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0)
     return false;
-  if (::bind(sock, (struct sockaddr *)&servAddr, sizeof(servAddr)) == 0)
-    if (close(sock) == 0)
-      return true;
-  return false;
+  bool available =
+      (::bind(sock, (struct sockaddr *)&servAddr, sizeof(servAddr)) == 0);
+
+  // Close the socket to avoid leaks
+  if (::close(sock) != 0) {
+    perror("Failed to close socket");
+    return false;
+  }
+
+  return available;
 }
 
 // Util to pick (at random) an available TCP/IP port for auto-launching a server
@@ -64,18 +70,18 @@ static std::optional<std::string> getRandomAvailablePort(int seed) {
         return std::to_string(randomPort);
     }
   }
-  cudaq::info("Failed to find a random TCP/IP port after {} trials.",
-              MAX_RETRIES);
+  CUDAQ_INFO("Failed to find a random TCP/IP port after {} trials.",
+             MAX_RETRIES);
   return {};
 }
 
 cudaq::AutoLaunchRestServerProcess::AutoLaunchRestServerProcess(
     int seed_offset) {
-  cudaq::info("Auto launch REST server");
+  CUDAQ_INFO("Auto launch REST server");
   const std::string serverExeName = "cudaq-qpud";
   const std::filesystem::path cudaqLibPath{cudaq::getCUDAQLibraryPath()};
   const auto binPath = cudaqLibPath.parent_path().parent_path() / "bin";
-  cudaq::info("Search for {} in {} directory.", serverExeName, binPath.c_str());
+  CUDAQ_INFO("Search for {} in {} directory.", serverExeName, binPath.c_str());
   auto serverApp =
       llvm::sys::findProgramByName(serverExeName.c_str(), {binPath.c_str()});
   if (!serverApp)
@@ -116,7 +122,9 @@ cudaq::AutoLaunchRestServerProcess::AutoLaunchRestServerProcess(
       if (!std::string(*env).starts_with("LD_LIBRARY_PATH="))
         Env->push_back(*env);
     }
-    Env->push_back("LD_LIBRARY_PATH=" + dynLibs);
+    // Cache the string as a member var to keep the pointer alive.
+    m_ldLibPathEnv = "LD_LIBRARY_PATH=" + dynLibs;
+    Env->push_back(m_ldLibPathEnv);
   }
 
   constexpr std::size_t PORT_MAX_RETRIES = 10;
@@ -143,8 +151,8 @@ cudaq::AutoLaunchRestServerProcess::AutoLaunchRestServerProcess(
     if (executionFailed)
       throw std::runtime_error("Failed to launch " + serverExeName +
                                " at port " + port.value() + ": " + errorMsg);
-    cudaq::info("Auto launch REST server at http://localhost:{} (PID {})",
-                port.value(), processInfo.Pid);
+    CUDAQ_INFO("Auto launch REST server at http://localhost:{} (PID {})",
+               port.value(), processInfo.Pid);
     m_pid = processInfo.Pid;
     m_url = fmt::format("localhost:{}", port.value());
 
@@ -169,9 +177,9 @@ cudaq::AutoLaunchRestServerProcess::AutoLaunchRestServerProcess(
       try {
         std::map<std::string, std::string> headers;
         [[maybe_unused]] auto pingResult = restClient.get(m_url, "", headers);
-        cudaq::info("Successfully connected to the REST server at "
-                    "http://localhost:{} (PID {}) after {} milliseconds.",
-                    port.value(), processInfo.Pid, totalWaitTimeMs);
+        CUDAQ_INFO("Successfully connected to the REST server at "
+                   "http://localhost:{} (PID {}) after {} milliseconds.",
+                   port.value(), processInfo.Pid, totalWaitTimeMs);
         return;
       } catch (...) {
         // Wait and retry
@@ -180,16 +188,16 @@ cudaq::AutoLaunchRestServerProcess::AutoLaunchRestServerProcess(
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
       }
     }
-    cudaq::info(
+    CUDAQ_INFO(
         "Timeout Error: No response from the server. Look for another port...");
-    cudaq::info("Shutting down REST server process {}", m_pid);
+    CUDAQ_INFO("Shutting down REST server process {}", m_pid);
     ::kill(m_pid, SIGKILL);
   }
   throw std::runtime_error("No usable ports available");
 }
 
 cudaq::AutoLaunchRestServerProcess::~AutoLaunchRestServerProcess() {
-  cudaq::info("Shutting down REST server process {}", m_pid);
+  CUDAQ_INFO("Shutting down REST server process {}", m_pid);
   ::kill(m_pid, SIGKILL);
 }
 

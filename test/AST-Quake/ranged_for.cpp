@@ -1,12 +1,12 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-// RUN: cudaq-quake %cpp_std %s | cudaq-opt | FileCheck %s
+// RUN: cudaq-quake %s | cudaq-opt | FileCheck %s
 
 #include <cudaq.h>
 
@@ -169,7 +169,7 @@ struct Qernel {
 // CHECK:           ^bb0(%[[VAL_13:.*]]: i64):
 // CHECK:             %[[VAL_15:.*]] = cc.compute_ptr %[[VAL_8]]{{\[}}%[[VAL_13]]] : (!cc.ptr<!cc.array<f64 x ?>>, i64) -> !cc.ptr<f64>
 // CHECK:             %[[VAL_16:.*]] = cc.load %[[VAL_15]] : !cc.ptr<f64>
-// CHECK:             %[[VAL_17:.*]] = func.call @sqrt(%[[VAL_16]]) : (f64) -> f64
+// CHECK:             %[[VAL_17:.*]] = math.sqrt %[[VAL_16]] : f64
 // CHECK:             cc.store %[[VAL_17]], %[[VAL_15]] : !cc.ptr<f64>
 // CHECK:             cc.continue %[[VAL_13]] : i64
 // CHECK:           } step {

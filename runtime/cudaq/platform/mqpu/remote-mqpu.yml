@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -16,15 +16,7 @@ config:
   platform-qpu: RemoteSimulatorQPU
   preprocessor-defines: ["-D CUDAQ_REMOTE_SIM"]
   link-libs: ["-lcudaq-remote-simulator-qpu"]
-  rules:
-    - if: ${LIBRARY_MODE}
-      compiler-flag: "-fembed-bitcode=all"
-      link-flag: "-rdynamic"
-    # Clang made "out of line atomics" the default on arm64 targets (https://reviews.llvm.org/D93585);
-    # requiring to link against `libclang_rt.builtins` on the server side when JIT'ing. 
-    # Hence, disable it when using the remote platform. 
-    - if: ${LIBRARY_MODE} && "$(uname -m)" == "aarch64"
-      compiler-flag: "-mno-outline-atomics" 
+  library-mode: false
 
 target-arguments:
   - key: backend

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -8,6 +8,7 @@
 
 #include "cudaq/Optimizer/Dialect/CC/CCTypes.h"
 #include "cudaq/Optimizer/Dialect/CC/CCDialect.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -103,6 +104,16 @@ cc::StructType::getPreferredAlignment(const DataLayout &dataLayout,
   return getAlignment();
 }
 
+LogicalResult
+cc::StructType::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
+                       mlir::StringAttr, llvm::ArrayRef<mlir::Type> members,
+                       bool, bool, unsigned long, unsigned int) {
+  for (auto ty : members)
+    if (quake::isQuantumType(ty))
+      return emitError() << "cc.struct may not contain quake types: " << ty;
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // ArrayType
 //===----------------------------------------------------------------------===//
@@ -118,7 +129,7 @@ Type cc::ArrayType::parse(AsmParser &parser) {
   }
   if (parser.parseKeyword("x"))
     return {};
-  SizeType size;
+  SizeType size = 0;
   if (succeeded(parser.parseOptionalQuestion())) {
     size = unknownSize;
   } else {
@@ -139,6 +150,24 @@ void cc::ArrayType::print(AsmPrinter &printer) const {
   printer << '>';
 }
 
+LogicalResult
+cc::ArrayType::verify(function_ref<InFlightDiagnostic()> emitError, Type eleTy,
+                      long) {
+  if (quake::isQuantumType(eleTy))
+    return emitError() << "cc.array may not have a quake element type: "
+                       << eleTy;
+  return success();
+}
+
+LogicalResult
+cc::StdvecType::verify(function_ref<InFlightDiagnostic()> emitError,
+                       Type eleTy) {
+  if (quake::isQuantumType(eleTy))
+    return emitError() << "cc.stdvec may not have a quake element type: "
+                       << eleTy;
+  return success();
+}
+
 } // namespace cudaq
 
 //===----------------------------------------------------------------------===//
@@ -152,9 +181,21 @@ void cc::ArrayType::print(AsmPrinter &printer) const {
 
 namespace cudaq::cc {
 
-Type cc::SpanLikeType::getElementType() const {
+Type SpanLikeType::getElementType() const {
   return llvm::TypeSwitch<Type, Type>(*this).Case<StdvecType, CharspanType>(
       [](auto type) { return type.getElementType(); });
+}
+
+bool isDevicePtr(Type argTy) {
+  auto ptrTy = dyn_cast<cc::PointerType>(argTy);
+  if (!ptrTy)
+    return false;
+  auto eleTy = ptrTy.getElementType();
+  auto structTy = dyn_cast<cc::StructType>(eleTy);
+  if (!structTy || !structTy.getName())
+    return false;
+
+  return structTy.getName().getValue() == "device_ptr";
 }
 
 bool isDynamicType(Type ty) {
@@ -172,13 +213,29 @@ bool isDynamicType(Type ty) {
   return false;
 }
 
+bool isDynamicallySizedType(Type ty) {
+  if (isa<SpanLikeType>(ty))
+    return false;
+  if (auto strTy = dyn_cast<StructType>(ty)) {
+    for (auto memTy : strTy.getMembers())
+      if (isDynamicallySizedType(memTy))
+        return true;
+    return false;
+  }
+  if (auto arrTy = dyn_cast<ArrayType>(ty))
+    return arrTy.isUnknownSize() ||
+           isDynamicallySizedType(arrTy.getElementType());
+  // Note: this isn't considering quake, builtin, etc. types.
+  return false;
+}
+
 CallableType CallableType::getNoSignature(MLIRContext *ctx) {
   return CallableType::get(ctx, FunctionType::get(ctx, {}, {}));
 }
 
 void CCDialect::registerTypes() {
   addTypes<ArrayType, CallableType, CharspanType, IndirectCallableType,
-           PointerType, StdvecType, StateType, StructType>();
+           PointerType, StdvecType, StructType>();
 }
 
 } // namespace cudaq::cc

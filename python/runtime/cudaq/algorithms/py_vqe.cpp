@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -10,22 +10,17 @@
 #include <pybind11/stl.h>
 
 #include "common/ArgumentWrapper.h"
-#include "common/JsonConvert.h"
-#include "common/SerializedCodeExecutionContext.h"
 #include "cudaq/Optimizer/Dialect/CC/CCTypes.h"
 #include "cudaq/algorithms/gradient.h"
 #include "cudaq/algorithms/optimizer.h"
-#include "py_utils.h"
 #include "py_vqe.h"
+#include "runtime/cudaq/platform/py_alt_launch_kernel.h"
 #include "utils/OpaqueArguments.h"
 #include "mlir/Bindings/Python/PybindAdaptors.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 namespace cudaq {
-
-void pyAltLaunchKernel(const std::string &, MlirModule, OpaqueArguments &,
-                       const std::vector<std::string> &);
 
 void *pyGetKernelArgs(const std::string &name, MlirModule module,
                       cudaq::OpaqueArguments &runtimeArgs,
@@ -37,7 +32,7 @@ mlir::func::FuncOp getKernelFuncOp(mlir::ModuleOp &mod,
                                    const std::string &kernelName) {
   mlir::func::FuncOp kernel;
   mod.walk([&](mlir::func::FuncOp func) {
-    if (func.getName().equals("__nvqpp__mlirgen__" + kernelName))
+    if (func.getName() == cudaq::runtime::cudaqGenPrefixName + kernelName)
       kernel = func;
     return mlir::WalkResult::advance();
   });
@@ -139,7 +134,7 @@ pyVQE_remote_cpp(cudaq::quantum_platform &platform, py::object &kernel,
   auto [kernelName, kernelMod] = getKernelNameAndModule(kernel);
   auto ctx = std::make_unique<ExecutionContext>("observe", /*shots=*/0);
   ctx->kernelName = kernelName;
-  ctx->spin = &hamiltonian;
+  ctx->spin = cudaq::spin_op::canonicalize(hamiltonian);
   platform.set_exec_ctx(ctx.get());
 
   constexpr std::size_t startingArgIdx = 1;
@@ -154,6 +149,7 @@ pyVQE_remote_cpp(cudaq::quantum_platform &platform, py::object &kernel,
     // Serialize arguments (all concrete parameters except for the first one)
     // into kernelArgs buffer space.
     auto kernelFunc = getKernelFuncOp(kernelMod, kernelName);
+    setDataLayout(kernelMod);
     cudaq::packArgs(
         args, runtimeArgs, kernelFunc,
         [](OpaqueArguments &, py::object &) { return false; }, startingArgIdx);
@@ -165,100 +161,13 @@ pyVQE_remote_cpp(cudaq::quantum_platform &platform, py::object &kernel,
   std::vector<std::string> names;
   auto *wrapper = new cudaq::ArgWrapper{unwrap(kernelMod), names, kernelArgs};
 
-  platform.launchVQE(kernelName, wrapper, gradient, hamiltonian, optimizer,
-                     n_params, shots);
+  platform.launchVQE(kernelName, wrapper, gradient, ctx->spin.value(),
+                     optimizer, n_params, shots);
   platform.reset_exec_ctx();
   delete wrapper;
   if (kernelArgs)
     std::free(kernelArgs);
   return ctx->optResult.value_or(optimization_result{});
-}
-
-/// @brief Perform VQE on a remote platform. This function is used for many of
-/// the pyVQE variants below, so some of the parameters may be nullptr.
-static optimization_result
-pyVQE_remote(cudaq::quantum_platform &platform, py::object &kernel,
-             spin_op &hamiltonian, cudaq::optimizer &optimizer,
-             cudaq::gradient *gradient, py::function *argumentMapper,
-             const int n_params, const int shots) {
-  py::object json = py::module_::import("json");
-  py::object inspect = py::module_::import("inspect");
-
-  // Form scoped_vars_str. This is needed for a) capturing user variables when
-  // an argumentMapper is provided, and b) automatically capturing all nested
-  // cudaq.kernels.
-  py::dict scoped_vars = get_serializable_var_dict();
-
-// This macro loads a JSON-like object into scoped_vars[] as
-// scoped_vars["__varname"] = varname. This roughly corresponds to the
-// following Python code:
-//  scoped_vars["__varname/module.name"] = json.loads(varname.to_json())
-#define LOAD_VAR(VAR_NAME)                                                     \
-  do {                                                                         \
-    py::object val = py::cast(VAR_NAME);                                       \
-    scoped_vars[py::str(                                                       \
-        std::string("__" #VAR_NAME "/") +                                      \
-        val.get_type().attr("__module__").cast<std::string>() + "." +          \
-        val.get_type().attr("__name__").cast<std::string>())] =                \
-        json.attr("loads")(val.attr("to_json")());                             \
-  } while (0)
-#define LOAD_VAR_NO_CAST(VAR_NAME)                                             \
-  do {                                                                         \
-    scoped_vars[py::str(                                                       \
-        std::string("__" #VAR_NAME "/") +                                      \
-        VAR_NAME.get_type().attr("__module__").cast<std::string>() + "." +     \
-        VAR_NAME.get_type().attr("__name__").cast<std::string>())] =           \
-        json.attr("loads")(VAR_NAME.attr("to_json")());                        \
-  } while (0)
-  LOAD_VAR(hamiltonian);
-  LOAD_VAR(optimizer);
-  LOAD_VAR_NO_CAST(kernel);
-  if (gradient)
-    LOAD_VAR(gradient);
-
-  // Get a string representation of the scoped_vars dictionary. This is
-  // guaranteed to be a JSON-friendly dictionary, so the conversion should occur
-  // cleanly.
-  auto scoped_vars_str = json.attr("dumps")(scoped_vars).cast<std::string>();
-
-  // Form SerializedCodeExecutionContext.source_code
-  std::ostringstream os;
-  if (argumentMapper) {
-    std::string source_code = cudaq::get_source_code(*argumentMapper);
-    // If it is a lambda function and it is used inline with a function call, it
-    // can sometimes include the trailing comma. Remove that here.
-    auto end = source_code.find_last_not_of(", \t\r\n");
-    if (end != std::string::npos)
-      source_code.erase(end + 1);
-    os << "__arg_mapper = " << source_code << '\n';
-  }
-  os << "energy, params_at_energy = cudaq.vqe(";
-  os << "kernel=__kernel, ";
-  if (gradient)
-    os << "gradient_strategy=__gradient, ";
-  os << "spin_operator=__hamiltonian, ";
-  os << "optimizer=__optimizer, ";
-  os << "parameter_count=" << n_params << ", ";
-  if (argumentMapper)
-    os << "argument_mapper=__arg_mapper, ";
-  os << "shots=" << shots << ")\n";
-  os << "_json_request_result['executionContext']['optResult'] = [energy, "
-        "params_at_energy]\n";
-  auto function_call = os.str();
-
-  SerializedCodeExecutionContext scCtx;
-  scCtx.scoped_var_dict = std::move(scoped_vars_str);
-  scCtx.source_code = std::move(function_call);
-
-  auto ctx = std::make_unique<cudaq::ExecutionContext>("sample", 0);
-  platform.set_exec_ctx(ctx.get());
-  platform.launchSerializedCodeExecution(
-      kernel.attr("name").cast<std::string>(), scCtx);
-  platform.reset_exec_ctx();
-  auto result = cudaq::optimization_result{};
-  if (ctx->optResult)
-    result = std::move(*ctx->optResult);
-  return result;
 }
 
 /// @brief Throw an exception instructing the user how to achieve optimal
@@ -283,10 +192,6 @@ optimization_result pyVQE(py::object &kernel, spin_op &hamiltonian,
                               n_params, shots);
     throwPerformanceError();
   }
-  if (platform.get_remote_capabilities().serializedCodeExec)
-    return pyVQE_remote(platform, kernel, hamiltonian, optimizer,
-                        /*gradient=*/nullptr, /*argumentMapper=*/nullptr,
-                        n_params, shots);
   return optimizer.optimize(n_params, [&](const std::vector<double> &x,
                                           std::vector<double> &grad_vec) {
     py::args params = py::make_tuple(x);
@@ -309,9 +214,6 @@ optimization_result pyVQE(py::object &kernel, spin_op &hamiltonian,
                               shots);
     throwPerformanceError();
   }
-  if (platform.get_remote_capabilities().serializedCodeExec)
-    return pyVQE_remote(platform, kernel, hamiltonian, optimizer,
-                        /*gradient=*/nullptr, &argumentMapper, n_params, shots);
   return optimizer.optimize(n_params, [&](const std::vector<double> &x,
                                           std::vector<double> &grad_vec) {
     py::args params;
@@ -342,9 +244,6 @@ optimization_result pyVQE(py::object &kernel, cudaq::gradient &gradient,
                               /*argumentMapper=*/nullptr, n_params, shots);
     throwPerformanceError();
   }
-  if (platform.get_remote_capabilities().serializedCodeExec)
-    return pyVQE_remote(platform, kernel, hamiltonian, optimizer, &gradient,
-                        /*argumentMapper=*/nullptr, n_params, shots);
   std::function<double(std::vector<double>)> get_expected_value =
       [&](std::vector<double> x) {
         py::args params = py::make_tuple(x);
@@ -380,9 +279,6 @@ optimization_result pyVQE(py::object &kernel, cudaq::gradient &gradient,
                               &gradient, &argumentMapper, n_params, shots);
     throwPerformanceError();
   }
-  if (platform.get_remote_capabilities().serializedCodeExec)
-    return pyVQE_remote(platform, kernel, hamiltonian, optimizer, &gradient,
-                        &argumentMapper, n_params, shots);
   std::function<double(std::vector<double>)> get_expected_value =
       [&](std::vector<double> x) {
         py::args params;

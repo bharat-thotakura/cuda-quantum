@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -12,19 +12,26 @@ endif()
 
 add_cudaq_library(OptTransforms
   AddDeallocs.cpp
-  AggressiveEarlyInlining.cpp
+  AddMeasurements.cpp
+  AggressiveInlining.cpp
   ApplyControlNegations.cpp
   ApplyOpSpecialization.cpp
   ArgumentSynthesis.cpp
   BasisConversion.cpp
+  ClassicalOptimization.cpp
   CombineMeasurements.cpp
   CombineQuantumAlloc.cpp
-  ConstPropComplex.cpp
+  ConstantPropagation.cpp
+  DeadStoreRemoval.cpp
   Decomposition.cpp
   DecompositionPatterns.cpp
+  DecompositionPatternSelection.cpp
   DelayMeasurements.cpp
   DeleteStates.cpp
+  DistributedDeviceCall.cpp
+  EraseNoise.cpp
   EraseNopCalls.cpp
+  EraseVectorCopyCtor.cpp
   ExpandControlVeqs.cpp
   ExpandMeasurements.cpp
   FactorQuantumAlloc.cpp
@@ -46,15 +53,27 @@ add_cudaq_library(OptTransforms
   DependencyAnalysis.cpp
   MultiControlDecomposition.cpp
   ObserveAnsatz.cpp
+  PhaseFolding.cpp
+  Pipelines.cpp
   PruneCtrlRelations.cpp
   PySynthCallableBlockArgs.cpp
   QuakeAddMetadata.cpp
+  QuakePropagateMetadata.cpp
+  QuakeSimplify.cpp
   QuakeSynthesizer.cpp
   RefToVeqAlloc.cpp
   RegToMem.cpp
+  ReplaceStateWithKernel.cpp
+  ResetBeforeReuse.cpp
+  ResourceCountPreprocess.cpp
+  SROA.cpp
+  StackFramePrealloc.cpp
   StatePreparation.cpp
   UnitarySynthesis.cpp
+  UpdateRegisterNames.cpp
+  VariableCoalesce.cpp
   WiresToWiresets.cpp
+  WriteAfterWriteElimination.cpp
 
   DEPENDS
     OptTransformsPassIncGen

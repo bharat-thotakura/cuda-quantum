@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -14,6 +14,7 @@
 #include "cudaq/Optimizer/CodeGen/Passes.h"
 #include "cudaq/Optimizer/CodeGen/Peephole.h"
 #include "cudaq/Optimizer/CodeGen/QIRFunctionNames.h"
+#include "cudaq/Optimizer/CodeGen/QIROpaqueStructTypes.h"
 #include "cudaq/Optimizer/CodeGen/QuakeToLLVM.h"
 #include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
@@ -37,6 +38,13 @@
 
 #define DEBUG_TYPE "convert-to-qir"
 
+/**
+   \file
+
+   This file translates Quake to full QIR. This pass \e only supports QIR
+   version 0.1.
+ */
+
 namespace cudaq::opt {
 #define GEN_PASS_DEF_CONVERTTOQIR
 #define GEN_PASS_DEF_LOWERTOCG
@@ -44,6 +52,8 @@ namespace cudaq::opt {
 } // namespace cudaq::opt
 
 using namespace mlir;
+
+#include "PeepholePatterns.inc"
 
 /// Greedy pass to match subgraphs in the IR and replace them with codegen ops.
 /// This step makes converting a DAG of nodes in the conversion step simpler.
@@ -106,9 +116,7 @@ public:
         auto buffer = origStore.getPtrvalue();
         const std::int32_t numConstants = carr.getConstantValues().size();
         auto constantValues = carr.getConstantValues();
-        const bool isComplex = isa<ComplexType>(eleTy);
-        for (std::int32_t idx = 0; idx < numConstants;
-             idx += isComplex ? 2 : 1) {
+        for (std::int32_t idx = 0; idx < numConstants; idx++) {
           auto v = [&]() -> Value {
             auto val = constantValues[idx];
             if (auto fTy = dyn_cast<FloatType>(eleTy))
@@ -118,14 +126,11 @@ public:
               return builder.create<arith::ConstantIntOp>(
                   loc, cast<IntegerAttr>(val).getInt(), iTy);
             auto cTy = cast<ComplexType>(eleTy);
-            auto complexVal = builder.getArrayAttr(
-                {cast<FloatAttr>(val),
-                 cast<FloatAttr>(constantValues[idx + 1])});
-            return builder.create<complex::ConstantOp>(loc, cTy, complexVal);
+            return builder.create<complex::ConstantOp>(loc, cTy,
+                                                       cast<ArrayAttr>(val));
           }();
-          std::int32_t vidx = isComplex ? (idx / 2) : idx;
           Value arrWithOffset = builder.create<cudaq::cc::ComputePtrOp>(
-              loc, ptrTy, buffer, ArrayRef<cudaq::cc::ComputePtrArg>{vidx});
+              loc, ptrTy, buffer, ArrayRef<cudaq::cc::ComputePtrArg>{idx});
           builder.create<cudaq::cc::StoreOp>(loc, v, arrWithOffset);
         }
         cleanUps.push_back(user);

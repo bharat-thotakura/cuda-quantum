@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -31,7 +31,8 @@ bool MPIPlugin::isValidInterfaceLib(
 }
 
 MPIPlugin::MPIPlugin(const std::string &distributedInterfaceLib) {
-  if (!dlopen(distributedInterfaceLib.c_str(), RTLD_GLOBAL | RTLD_NOW)) {
+  m_libhandle = dlopen(distributedInterfaceLib.c_str(), RTLD_GLOBAL | RTLD_NOW);
+  if (!m_libhandle) {
     const std::string errorMsg(dlerror());
     throw std::runtime_error("Unable to open distributed interface library '" +
                              distributedInterfaceLib + "': " + errorMsg);
@@ -45,6 +46,13 @@ MPIPlugin::MPIPlugin(const std::string &distributedInterfaceLib) {
   assert(m_distributedInterface && m_comm);
   m_valid = m_comm->commSize > 0;
   m_libFile = distributedInterfaceLib;
+}
+
+MPIPlugin::~MPIPlugin() {
+  if (m_libhandle) {
+    dlclose(m_libhandle);
+    m_libhandle = nullptr;
+  }
 }
 
 void MPIPlugin::initialize() {
@@ -117,15 +125,15 @@ void MPIPlugin::all_reduce(std::vector<double> &global,
 }
 
 void MPIPlugin::finalize() {
-  if (rank() == 0)
-    cudaq::info("Finalizing MPI.");
-
   // Check if finalize has been called.
   int isFinalized{0};
   HANDLE_MPI_ERROR(m_distributedInterface->finalized(&isFinalized));
 
   if (isFinalized)
     return;
+
+  if (rank() == 0)
+    CUDAQ_INFO("Finalizing MPI.");
 
   // Finalize
   HANDLE_MPI_ERROR(m_distributedInterface->finalize());

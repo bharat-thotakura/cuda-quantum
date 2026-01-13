@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -63,7 +63,8 @@ if [ "${toolchain#gcc}" != "$toolchain" ]; then
     gcc_version=${toolchain#gcc}
     if [ -x "$(command -v apt-get)" ]; then
         apt-get update && apt-get install -y --no-install-recommends \
-            gcc-$gcc_version g++-$gcc_version gfortran-$gcc_version
+            gcc-$gcc_version g++-$gcc_version gfortran-$gcc_version \
+            libstdc++-$gcc_version-dev build-essential
 
         CC="$(find_executable gcc-$gcc_version)" 
         CXX="$(find_executable g++-$gcc_version)" 

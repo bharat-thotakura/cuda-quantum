@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -9,9 +9,11 @@
 #pragma once
 
 #include "common/CustomOp.h"
+#include "common/NoiseModel.h"
 #include "common/QuditIdTracker.h"
+#include "common/SampleResult.h"
 #include "cudaq/host_config.h"
-#include "cudaq/spin_op.h"
+#include "cudaq/operators.h"
 #include <deque>
 #include <string_view>
 #include <vector>
@@ -54,8 +56,17 @@ public:
   measure_result(int res, std::size_t id) : result(res), uniqueId(id) {}
   measure_result(int res) : result(res) {}
 
-  operator int() { return result; }
-  operator bool() { return __nvqpp__MeasureResultBoolConversion(result); }
+  operator int() const { return result; }
+  operator bool() const { return __nvqpp__MeasureResultBoolConversion(result); }
+
+  static std::vector<bool>
+  to_bool_vector(const std::vector<measure_result> &results) {
+    std::vector<bool> boolResults;
+    boolResults.reserve(results.size());
+    for (const auto &res : results)
+      boolResults.push_back(static_cast<bool>(res));
+    return boolResults;
+  }
 };
 #else
 /// When compiling with MLIR, we default to a boolean.
@@ -130,7 +141,12 @@ public:
                      const std::vector<double> &params,
                      const std::vector<QuditInfo> &controls,
                      const std::vector<QuditInfo> &targets,
-                     bool isAdjoint = false, const spin_op op = spin_op()) = 0;
+                     bool isAdjoint = false,
+                     const spin_op_term op = cudaq::spin_op::identity()) = 0;
+
+  /// @brief Apply a fine-grain noise operation within a kernel.
+  virtual void applyNoise(const kraus_channel &channelName,
+                          const std::vector<QuditInfo> &targets) = 0;
 
   /// Reset the qubit to the |0> state
   virtual void reset(const QuditInfo &target) = 0;
@@ -152,9 +168,9 @@ public:
   virtual int measure(const QuditInfo &target,
                       const std::string registerName = "") = 0;
 
-  /// Measure the current state in the given Pauli basis, return the expectation
-  /// value <term>.
-  virtual SpinMeasureResult measure(cudaq::spin_op &op) = 0;
+  /// Measure the current state in the respective basis given by each term in
+  /// the spin op, return the expectation value <term>.
+  virtual SpinMeasureResult measure(const cudaq::spin_op &op) = 0;
 
   /// Synchronize - run all queue-ed instructions
   virtual void synchronize() = 0;

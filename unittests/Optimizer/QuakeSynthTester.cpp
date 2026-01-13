@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -71,16 +71,16 @@ LogicalResult lowerToLLVMDialect(ModuleOp module) {
   module->getContext()->disableMultithreading();
   pm.enableIRPrinting();
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  OpPassManager &optPM = pm.nest<func::FuncOp>();
   pm.addPass(cudaq::opt::createExpandMeasurementsPass());
-  optPM.addPass(cudaq::opt::createClassicalMemToReg());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createClassicalMemToReg());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createLoopUnroll());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  optPM.addPass(cudaq::opt::createQuakeAddDeallocs());
-  optPM.addPass(cudaq::opt::createQuakeAddMetadata());
-  optPM.addPass(cudaq::opt::createLowerToCFGPass());
-  optPM.addPass(cudaq::opt::createCombineQuantumAllocations());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddDeallocs());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddMetadata());
+  pm.addPass(cudaq::opt::createQuakePropagateMetadata());
+  cudaq::opt::addLowerToCFG(pm);
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createCombineQuantumAllocations());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createCSEPass());
   pm.addPass(cudaq::opt::createConvertToQIR());
@@ -97,7 +97,7 @@ cudaq::sample_result sampleJitCode(ExecutionEngine *jit,
                                             kernelName);
                ASSERT_TRUE(!err);
              },
-             p, kernelName, 1000)
+             p, kernelName, 1000, /*explicitMeasurements=*/false)
       .value();
 }
 
@@ -178,11 +178,13 @@ TEST(QuakeSynthTests, checkDoubleInput) {
   // Set the proper name for the kernel
   auto properName = cudaq::runtime::cudaqGenPrefixName + kernel.name();
 
-  using namespace cudaq::spin;
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
-  cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
-                      3.913119 * y(1) * y(2);
+  cudaq::spin_op h =
+      5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+      2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+      .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
+  cudaq::spin_op h3 = h + 9.625 - 9.625 * cudaq::spin_op::z(2) -
+                      3.913119 * cudaq::spin_op::x(1) * cudaq::spin_op::x(2) -
+                      3.913119 * cudaq::spin_op::y(1) * cudaq::spin_op::y(2);
 
   double energy = cudaq::observe(kernel, h3, .3591, .2569);
   EXPECT_NEAR(energy, -2.045375, 1e-3);
@@ -235,11 +237,13 @@ TEST(QuakeSynthTests, checkVectorOfDouble) {
   // Set the proper name for the kernel
   auto properName = cudaq::runtime::cudaqGenPrefixName + kernel.name();
 
-  using namespace cudaq::spin;
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
-  cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
-                      3.913119 * y(1) * y(2);
+  cudaq::spin_op h =
+      5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+      2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+      .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
+  cudaq::spin_op h3 = h + 9.625 - 9.625 * cudaq::spin_op::z(2) -
+                      3.913119 * cudaq::spin_op::x(1) * cudaq::spin_op::x(2) -
+                      3.913119 * cudaq::spin_op::y(1) * cudaq::spin_op::y(2);
 
   double energy = cudaq::observe(kernel, h3, std::vector<double>{.3591, .2569});
   EXPECT_NEAR(energy, -2.045375, 1e-3);
@@ -283,7 +287,10 @@ TEST(QuakeSynthTests, checkVectorOfInt) {
   kernel.h(aq);
   kernel.z(aq);
   kernel.h(q);
-  for (std::size_t i = 0; i < *q.constantSize(); ++i) {
+  // FIXME: This test never really tested the c_if in this loop. The call to
+  // constantSize just returned 0.
+  std::size_t unrollBy = q.constantSize().has_value() ? *q.constantSize() : 0;
+  for (std::size_t i = 0; i < unrollBy; ++i) {
     kernel.c_if(hiddenBits[i], [&]() { kernel.x<cudaq::ctrl>(aq, q[i]); });
   }
   kernel.h(q);
@@ -342,9 +349,10 @@ TEST(QuakeSynthTests, checkCallable) {
   auto properName = cudaq::runtime::cudaqGenPrefixName + kernel.name();
 
   std::vector<double> argsValue = {0.0};
-  using namespace cudaq::spin;
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
+  cudaq::spin_op h =
+      5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+      2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+      .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
   double energy = cudaq::observe(kernel, h, argsValue);
   std::cout << "Energy = " << energy << "\n";
   // Map the kernel_builder to_quake output to MLIR

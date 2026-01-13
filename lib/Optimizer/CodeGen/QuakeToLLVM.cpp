@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -9,8 +9,11 @@
 #include "cudaq/Optimizer/CodeGen/QuakeToLLVM.h"
 #include "CodeGenOps.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
+#include "cudaq/Optimizer/Builder/Runtime.h"
 #include "cudaq/Optimizer/CodeGen/Passes.h"
 #include "cudaq/Optimizer/CodeGen/QIRFunctionNames.h"
+#include "cudaq/Optimizer/CodeGen/QIROpaqueStructTypes.h"
+#include "cudaq/Optimizer/CodeGen/QuakeToExecMgr.h"
 #include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
@@ -64,13 +67,13 @@ public:
     // be compile time known and encoded in the veq return type.
     Value sizeOperand;
     if (adaptor.getOperands().empty()) {
-      auto type = alloca.getResult().getType().cast<quake::VeqType>();
+      auto type = cast<quake::VeqType>(alloca.getResult().getType());
       auto constantSize = type.getSize();
       sizeOperand =
           rewriter.create<arith::ConstantIntOp>(loc, constantSize, 64);
     } else {
       sizeOperand = adaptor.getOperands().front();
-      if (sizeOperand.getType().cast<IntegerType>().getWidth() < 64) {
+      if (cast<IntegerType>(sizeOperand.getType()).getWidth() < 64) {
         sizeOperand = rewriter.create<LLVM::ZExtOp>(loc, rewriter.getI64Type(),
                                                     sizeOperand);
       }
@@ -113,7 +116,7 @@ public:
       fromComplex = true;
       eleTy = complexTy.getElementType();
     }
-    if (isa<cudaq::cc::StateType>(eleTy))
+    if (isa<quake::StateType>(eleTy))
       functionName = cudaq::opt::QIRArrayQubitAllocateArrayWithCudaqStatePtr;
     if (eleTy == rewriter.getF64Type())
       functionName =
@@ -180,7 +183,7 @@ public:
     // Could be a dealloc on a ref or a veq
     StringRef qirQuantumDeallocateFunc;
     Type operandType, qType = dealloc.getOperand().getType();
-    if (qType.isa<quake::VeqType>()) {
+    if (isa<quake::VeqType>(qType)) {
       qirQuantumDeallocateFunc = cudaq::opt::QIRArrayQubitReleaseArray;
       operandType = cudaq::opt::getArrayType(context);
     } else {
@@ -296,9 +299,9 @@ public:
   LogicalResult
   matchAndRewrite(quake::ExtractRefOp extract, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto loc = extract->getLoc();
+    auto loc = extract.getLoc();
     auto parentModule = extract->getParentOfType<ModuleOp>();
-    auto context = parentModule->getContext();
+    auto *context = rewriter.getContext();
 
     auto qir_array_get_element_ptr_1d = cudaq::opt::QIRArrayGetElementPtr1d;
 
@@ -319,7 +322,7 @@ public:
       idx_operand = adaptor.getOperands()[1];
 
       if (idx_operand.getType().isIntOrFloat() &&
-          idx_operand.getType().cast<IntegerType>().getWidth() < 64)
+          cast<IntegerType>(idx_operand.getType()).getWidth() < 64)
         idx_operand = rewriter.create<LLVM::ZExtOp>(loc, i64Ty, idx_operand);
     }
 
@@ -406,8 +409,8 @@ public:
       return adaptor.getUpper();
     }();
     auto extend = [&](Value &v) -> Value {
-      if (v.getType().isa<IntegerType>() &&
-          v.getType().cast<IntegerType>().getWidth() < 64)
+      if (isa<IntegerType>(v.getType()) &&
+          cast<IntegerType>(v.getType()).getWidth() < 64)
         return rewriter.create<LLVM::ZExtOp>(loc, i64Ty, v);
       return v;
     };
@@ -476,6 +479,15 @@ public:
     // a pauli_word directly `{i8*,i64}` or a string literal
     // `ptr<i8>`. If it is a string literal, we need to map it to
     // a pauli word.
+    if (instOp.getPauliLiteralAttr()) {
+      auto builder = cudaq::IRBuilder::atBlockEnd(parentModule.getBody());
+      auto pauliConst = builder.genCStringLiteralAppendNul(
+          loc, parentModule, *instOp.getPauliLiteral());
+      // Create a pauli reference and make it the last operand.
+      operands.push_back(rewriter.create<LLVM::AddressOfOp>(
+          loc, cudaq::opt::factory::getPointerType(pauliConst.getType()),
+          pauliConst.getSymName()));
+    }
     auto pauliWord = operands.back();
     if (auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(pauliWord.getType())) {
       // Make sure we have the right types to extract the
@@ -773,7 +785,7 @@ public:
     auto control = *instOp.getControls().begin();
     Type type = control.getType();
     // If type is a VeqType, then we're good, just forward to the call op
-    if (numControls == 1 && type.isa<quake::VeqType>()) {
+    if (numControls == 1 && isa<quake::VeqType>(type)) {
 
       // Add the control array to the args.
       funcArgs.push_back(adaptor.getControls().front());
@@ -953,7 +965,7 @@ public:
     auto control = *instOp.getControls().begin();
     Type type = control.getType();
     // If type is a VeqType, then we're good, just forward to the call op
-    if (numControls == 1 && type.isa<quake::VeqType>()) {
+    if (numControls == 1 && isa<quake::VeqType>(type)) {
 
       // Add the control array to the args.
       funcArgs.push_back(adaptor.getControls().front());
@@ -1072,7 +1084,7 @@ public:
     std::vector<Value> args{adaptor.getOperands().front()};
 
     bool appendName;
-    if (regName && !regName.cast<StringAttr>().getValue().empty()) {
+    if (regName && !cast<StringAttr>(regName).getValue().empty()) {
       // Change the function name
       qFunctionName += "__to__register";
       // Append a string type argument
@@ -1095,7 +1107,7 @@ public:
       appendName = false;
     }
     // Get the name
-    auto regNameAttr = regName.cast<StringAttr>();
+    auto regNameAttr = cast<StringAttr>(regName);
     auto regNameStr = regNameAttr.getValue().str();
     std::string regNameGlobalStr = regNameStr;
 
@@ -1136,40 +1148,6 @@ public:
         rewriter.create<LLVM::BitcastOp>(loc, i1PtrTy, callOp.getResult());
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(measure, i1Ty, cast);
 
-    return success();
-  }
-};
-
-/// Convert a MX operation to a sequence H; MZ.
-class MxToMz : public OpConversionPattern<quake::MxOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(quake::MxOp mx, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    rewriter.create<quake::HOp>(mx.getLoc(), adaptor.getTargets());
-    rewriter.replaceOpWithNewOp<quake::MzOp>(mx, mx.getResultTypes(),
-                                             adaptor.getTargets(),
-                                             mx.getRegisterNameAttr());
-    return success();
-  }
-};
-
-/// Convert a MY operation to a sequence S; H; MZ.
-class MyToMz : public OpConversionPattern<quake::MyOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(quake::MyOp my, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    rewriter.create<quake::SOp>(my.getLoc(), true, ValueRange{}, ValueRange{},
-                                adaptor.getTargets());
-    rewriter.create<quake::HOp>(my.getLoc(), adaptor.getTargets());
-    rewriter.replaceOpWithNewOp<quake::MzOp>(my, my.getResultTypes(),
-                                             adaptor.getTargets(),
-                                             my.getRegisterNameAttr());
     return success();
   }
 };
@@ -1368,10 +1346,9 @@ public:
       auto globalName = generatorName.str();
       // IMPORTANT: this must match the logic to generate global data
       // globalName = f'{nvqppPrefix}{opName}_generator_{numTargets}.rodata'
-      const std::string nvqppPrefix = "__nvqpp__mlirgen__";
       const std::string generatorSuffix = "_generator";
-      if (globalName.starts_with(nvqppPrefix)) {
-        globalName = globalName.substr(nvqppPrefix.size());
+      if (globalName.starts_with(cudaq::runtime::cudaqGenPrefixName)) {
+        globalName = globalName.substr(cudaq::runtime::cudaqGenPrefixLength);
         const size_t pos = globalName.find(generatorSuffix);
         if (pos != std::string::npos)
           return globalName.substr(0, pos);
@@ -1407,8 +1384,8 @@ public:
     auto unitaryData =
         rewriter.create<LLVM::BitcastOp>(loc, complex64PtrTy, addrOp);
 
-    auto qirFunctionName =
-        std::string{cudaq::opt::QIRCustomOp} + (op.isAdj() ? "__adj" : "");
+    StringRef qirFunctionName =
+        op.isAdj() ? cudaq::opt::QIRCustomAdjOp : cudaq::opt::QIRCustomOp;
 
     FlatSymbolRefAttr customSymbolRef =
         cudaq::opt::factory::createLLVMFunctionSymbol(
@@ -1431,8 +1408,10 @@ void cudaq::opt::populateQuakeToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                              RewritePatternSet &patterns,
                                              unsigned &measureCounter) {
   auto *context = patterns.getContext();
-  patterns.insert<GetVeqSizeOpRewrite, RemoveRelaxSizeRewrite, MxToMz, MyToMz,
-                  ReturnBitRewrite>(context);
+  cudaq::opt::populateQuakeToCCPrepPatterns(patterns);
+  patterns
+      .insert<GetVeqSizeOpRewrite, RemoveRelaxSizeRewrite, ReturnBitRewrite>(
+          context);
   patterns
       .insert<AllocaOpRewrite, ConcatOpRewrite, CustomUnitaryOpRewrite,
               DeallocOpRewrite, DiscriminateOpPattern, ExtractQubitOpRewrite,

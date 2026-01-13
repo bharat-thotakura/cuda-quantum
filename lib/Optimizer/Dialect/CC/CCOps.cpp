@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -210,14 +210,34 @@ OpFoldResult cudaq::cc::CastOp::fold(FoldAdaptor adaptor) {
     auto fltTy = builder.getF32Type();
     auto dblTy = builder.getF64Type();
     auto loc = getLoc();
+    auto truncate = [&](std::int64_t val) -> std::int64_t {
+      auto srcTy = getValue().getType();
+      auto srcWidth = srcTy.getIntOrFloatBitWidth();
+      // Zero-extend to get the original integer value.
+      if (srcWidth < 64)
+        val &= ((1UL << srcWidth) - 1);
+      return val;
+    };
+
     if (auto attr = dyn_cast<IntegerAttr>(optConst)) {
       auto val = attr.getInt();
       if (isa<IntegerType>(ty)) {
         auto width = ty.getIntOrFloatBitWidth();
+
+        if (getZint())
+          val = truncate(val);
+
+        if (width == 1) {
+          bool v = val != 0;
+          return builder.create<arith::ConstantIntOp>(loc, v, width)
+              .getResult();
+        }
         return builder.create<arith::ConstantIntOp>(loc, val, width)
             .getResult();
+
       } else if (ty == fltTy) {
         if (getZint()) {
+          val = truncate(val);
           APFloat fval(static_cast<float>(static_cast<std::uint64_t>(val)));
           return builder.create<arith::ConstantFloatOp>(loc, fval, fltTy)
               .getResult();
@@ -229,6 +249,7 @@ OpFoldResult cudaq::cc::CastOp::fold(FoldAdaptor adaptor) {
         }
       } else if (ty == dblTy) {
         if (getZint()) {
+          val = truncate(val);
           APFloat fval(static_cast<double>(static_cast<std::uint64_t>(val)));
           return builder.create<arith::ConstantFloatOp>(loc, fval, dblTy)
               .getResult();
@@ -240,8 +261,24 @@ OpFoldResult cudaq::cc::CastOp::fold(FoldAdaptor adaptor) {
         }
       }
     }
+
+    // %5 = arith.constant ... : F1
+    // %6 = cc.cast %5 : (F1) -> F2
+    // ────────────────────────────
+    // %6 = arith.constant ... : F2
     if (auto attr = dyn_cast<FloatAttr>(optConst)) {
       auto val = attr.getValue();
+      if (ty == fltTy) {
+        float f = val.convertToDouble();
+        APFloat fval(f);
+        return builder.create<arith::ConstantFloatOp>(loc, fval, fltTy)
+            .getResult();
+      }
+      if (ty == dblTy) {
+        APFloat fval{val.convertToDouble()};
+        return builder.create<arith::ConstantFloatOp>(loc, fval, dblTy)
+            .getResult();
+      }
       if (isa<IntegerType>(ty)) {
         auto width = ty.getIntOrFloatBitWidth();
         if (getZint()) {
@@ -254,22 +291,13 @@ OpFoldResult cudaq::cc::CastOp::fold(FoldAdaptor adaptor) {
           return builder.create<arith::ConstantIntOp>(loc, v, width)
               .getResult();
         }
-      } else if (ty == fltTy) {
-        float f = val.convertToDouble();
-        APFloat fval(f);
-        return builder.create<arith::ConstantFloatOp>(loc, fval, fltTy)
-            .getResult();
-      } else if (ty == dblTy) {
-        APFloat fval{val.convertToDouble()};
-        return builder.create<arith::ConstantFloatOp>(loc, fval, dblTy)
-            .getResult();
       }
     }
 
-    // %5 = complex.constant ... -> complex<T>
+    // %5 = complex.constant ... : complex<T>
     // %6 = cc.cast %5 : (complex<T>) -> complex<U>
     // ────────────────────────────────────────────
-    // %6 = complex.constant ... -> complex<U>
+    // %6 = complex.constant ... : complex<U>
     if (auto attr = dyn_cast<ArrayAttr>(optConst)) {
       auto eleTy = cast<ComplexType>(ty).getElementType();
       auto reFp = dyn_cast<FloatAttr>(attr[0]);
@@ -282,7 +310,8 @@ OpFoldResult cudaq::cc::CastOp::fold(FoldAdaptor adaptor) {
           auto imPart = builder.getFloatAttr(eleTy, APFloat{imVal});
           auto cv = builder.getArrayAttr({rePart, imPart});
           return builder.create<complex::ConstantOp>(loc, ty, cv).getResult();
-        } else if (eleTy == dblTy) {
+        }
+        if (eleTy == dblTy) {
           double reVal = reFp.getValue().convertToDouble();
           double imVal = imFp.getValue().convertToDouble();
           auto rePart = builder.getFloatAttr(eleTy, APFloat{reVal});
@@ -304,10 +333,25 @@ LogicalResult cudaq::cc::CastOp::verify() {
   if (getSint() || getZint()) {
     if (getSint() && getZint())
       return emitOpError("cannot be both signed and unsigned.");
-    if ((isa<IntegerType>(inTy) && isa<IntegerType>(outTy)) ||
-        (isa<FloatType>(inTy) && isa<IntegerType>(outTy)) ||
-        (isa<IntegerType>(inTy) && isa<FloatType>(outTy))) {
+    if (isa<IntegerType>(inTy) && isa<IntegerType>(outTy)) {
+      if (cast<IntegerType>(inTy).getWidth() >
+          cast<IntegerType>(outTy).getWidth())
+        return emitOpError("signed (unsigned) may only be applied to integer "
+                           "to integer extension, not truncation.");
+    } else if ((isa<FloatType>(inTy) && isa<IntegerType>(outTy)) ||
+               (isa<IntegerType>(inTy) && isa<FloatType>(outTy))) {
       // ok, do nothing.
+    } else if (isa<ComplexType>(inTy) && isa<ComplexType>(outTy)) {
+      auto inEleTy = cast<ComplexType>(inTy).getElementType();
+      auto outEleTy = cast<ComplexType>(outTy).getElementType();
+      if ((isa<IntegerType>(inEleTy) && isa<IntegerType>(outEleTy)) ||
+          (isa<FloatType>(inEleTy) && isa<IntegerType>(outEleTy)) ||
+          (isa<IntegerType>(inEleTy) && isa<FloatType>(outEleTy))) {
+      } else {
+        return emitOpError(
+            "signed (unsigned) may only be applied to complex of integer "
+            "to/from complex of integer or complex of float.");
+      }
     } else {
       return emitOpError("signed (unsigned) may only be applied to integer to "
                          "integer or integer to/from float.");
@@ -358,12 +402,32 @@ LogicalResult cudaq::cc::CastOp::verify() {
   } else if (isa<cc::PointerType, LLVM::LLVMPointerType>(inTy) &&
              isa<cc::PointerType, LLVM::LLVMPointerType>(outTy)) {
     // ok, pointer casts: bitcast, nop
+  } else if (isa<cc::PointerType, LLVM::LLVMPointerType>(inTy)) {
+    // ok, will become pointer casts: nop
   } else if (isa<ComplexType>(inTy) && isa<ComplexType>(outTy)) {
-    // ok, type conversion of a complex value
-    // NB: use complex.re or complex.im to convert (extract) a fp value.
+    auto inEleTy = cast<ComplexType>(inTy).getElementType();
+    auto outEleTy = cast<ComplexType>(outTy).getElementType();
+    if (isa<FloatType>(inEleTy) && isa<FloatType>(outEleTy)) {
+      // ok, type conversion of a complex floating-point value
+      // NB: use complex.re or complex.im to convert (extract) a fp value.
+    } else {
+      // TODO: For now, disable complex<int>. All variants of complex<int>
+      // require a signed/unsigned modifier. These include to/from complex<int>
+      // and to/from complex<fp>.
+      return emitOpError("invalid complex cast.");
+    }
   } else if (isa<FunctionType>(inTy) && isa<cc::IndirectCallableType>(outTy)) {
     // ok, type conversion of a function to an indirect callable
     // Folding will remove this.
+  } else if (isa<FunctionType>(inTy) && isa<cc::PointerType>(outTy)) {
+    auto ptrTy = cast<cc::PointerType>(outTy);
+    auto eleTy = ptrTy.getElementType();
+    auto *ctx = eleTy.getContext();
+    if (eleTy == NoneType::get(ctx) || eleTy == IntegerType::get(ctx, 8)) {
+      // ok, type conversion of a function to a pointer.
+    } else {
+      return emitOpError("invalid cast.");
+    }
   } else {
     // Could support a bitcast of a float with pointer size bits to/from a
     // pointer, but that doesn't seem like it would be very common.
@@ -426,8 +490,12 @@ struct SimplifyIntegerCompare : public OpRewritePattern<arith::CmpIOp> {
     return failure();
   }
 };
+} // namespace
 
-// Ad hoc pattern to erase complex.create. (MLIR doesn't do this.)
+namespace {
+// Ad hoc pattern to erase complex.create. (MLIR doesn't do this.) This pattern
+// gets piggybacked into the canonicalizations, but does NOT have anything to do
+// with cc::CastOp.
 struct FuseComplexCreate : public OpRewritePattern<complex::CreateOp> {
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(complex::CreateOp create,
@@ -447,12 +515,48 @@ struct FuseComplexCreate : public OpRewritePattern<complex::CreateOp> {
     return failure();
   }
 };
+
+struct FuseComplexRe : public OpRewritePattern<complex::ReOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(complex::ReOp reop,
+                                PatternRewriter &rewriter) const override {
+    auto comcon = reop.getReal().getDefiningOp<complex::ConstantOp>();
+    if (comcon) {
+      FloatType fltTy = reop.getType();
+      APFloat reVal = cast<FloatAttr>(comcon.getValue()[0]).getValue();
+      rewriter.replaceOpWithNewOp<arith::ConstantFloatOp>(reop, reVal, fltTy);
+      return success();
+    }
+    return failure();
+  }
+};
+
+struct FuseComplexIm : public OpRewritePattern<complex::ImOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(complex::ImOp imop,
+                                PatternRewriter &rewriter) const override {
+    auto comcon = imop.getImaginary().getDefiningOp<complex::ConstantOp>();
+    if (comcon) {
+      FloatType fltTy = imop.getType();
+      APFloat imVal = cast<FloatAttr>(comcon.getValue()[1]).getValue();
+      rewriter.replaceOpWithNewOp<arith::ConstantFloatOp>(imop, imVal, fltTy);
+      return success();
+    }
+    return failure();
+  }
+};
 } // namespace
+
+static void
+getArbitraryCustomCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  patterns.add<FuseComplexCreate, FuseComplexRe, FuseComplexIm>(context);
+}
 
 void cudaq::cc::CastOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *context) {
-  patterns.add<FuseCastCascade, SimplifyIntegerCompare, FuseComplexCreate>(
-      context);
+  patterns.add<FuseCastCascade, SimplifyIntegerCompare>(context);
+  getArbitraryCustomCanonicalizationPatterns(patterns, context);
 }
 
 //===----------------------------------------------------------------------===//
@@ -494,7 +598,7 @@ void printInterleavedIndices(OpAsmPrinter &printer, B computePtrOp,
                              DenseI32ArrayAttr rawConstantIndices) {
   llvm::interleaveComma(Adaptor{rawConstantIndices, indices}, printer,
                         [&](PointerUnion<IntegerAttr, Value> cst) {
-                          if (Value val = cst.dyn_cast<Value>())
+                          if (Value val = dyn_cast<Value>(cst))
                             printer.printOperand(val);
                           else
                             printer << cst.get<IntegerAttr>().getInt();
@@ -980,6 +1084,13 @@ struct FuseWithConstantArray
 
           return success();
         }
+        if (auto complexTy = dyn_cast<ComplexType>(extval.getType())) {
+          std::int32_t i = extval.getRawConstantIndices()[0];
+          auto cval = cast<ArrayAttr>(conarr.getConstantValues()[i]);
+          rewriter.replaceOpWithNewOp<complex::ConstantOp>(extval, complexTy,
+                                                           cval);
+          return success();
+        }
       }
     return failure();
   }
@@ -1065,14 +1176,141 @@ void cudaq::cc::GlobalOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
+// InsertValueOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult cudaq::cc::InsertValueOp::verify() {
+  Type eleTy = getContainer().getType();
+  auto resultTy = getResult().getType();
+
+  if (!isCompatible(eleTy, resultTy))
+    return emitOpError("result type does not match input");
+
+  for (std::int32_t i : getPosition()) {
+    if (auto arrTy = dyn_cast<cc::ArrayType>(eleTy)) {
+      if (arrTy.isUnknownSize())
+        return emitOpError("array must have constant size");
+      if (i < 0 || static_cast<std::int64_t>(i) >= arrTy.getSize())
+        return emitOpError("array cannot index out of bounds elements");
+      eleTy = arrTy.getElementType();
+    } else if (auto strTy = dyn_cast<cc::StructType>(eleTy)) {
+      if (i < 0 || static_cast<std::size_t>(i) >= strTy.getMembers().size())
+        return emitOpError("struct cannot index out of bounds members");
+      eleTy = strTy.getMember(i);
+    } else if (auto complexTy = dyn_cast<ComplexType>(eleTy)) {
+      if (!(i == 0 || i == 1))
+        return emitOpError("complex index is out of bounds");
+      eleTy = complexTy.getElementType();
+    } else {
+      return emitOpError(std::string{"too many indices ("} +
+                         std::to_string(getPosition().size()) +
+                         ") for the source pointer");
+    }
+  }
+
+  Type valTy = getValue().getType();
+  if (!isCompatible(valTy, eleTy))
+    return emitOpError("value type does not match selected element");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// StdvecInitOp
+//===----------------------------------------------------------------------===//
+
+namespace {
+struct CollapseCastToStdvecInit
+    : public OpRewritePattern<cudaq::cc::StdvecInitOp> {
+  using Base = OpRewritePattern<cudaq::cc::StdvecInitOp>;
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(cudaq::cc::StdvecInitOp init,
+                                PatternRewriter &rewriter) const override {
+    if (auto buff = init.getBuffer().getDefiningOp<cudaq::cc::CastOp>()) {
+      auto castVal = buff.getValue();
+      auto fromPtrTy = dyn_cast<cudaq::cc::PointerType>(castVal.getType());
+      if (!fromPtrTy)
+        return failure();
+      auto fromTy = fromPtrTy.getElementType();
+      auto toTy = cast<cudaq::cc::PointerType>(buff.getType()).getElementType();
+      if (auto arrTy = dyn_cast<cudaq::cc::ArrayType>(fromTy))
+        if (!isa<cudaq::cc::ArrayType>(toTy)) {
+          if (arrTy.isUnknownSize())
+            rewriter.replaceOpWithNewOp<cudaq::cc::StdvecInitOp>(
+                init, init.getType(), castVal, init.getLength());
+          else
+            rewriter.replaceOpWithNewOp<cudaq::cc::StdvecInitOp>(
+                init, init.getType(), castVal);
+          return success();
+        }
+    }
+    return failure();
+  }
+};
+
+struct FoldStdvecInit : public OpRewritePattern<cudaq::cc::StdvecInitOp> {
+  using Base = OpRewritePattern<cudaq::cc::StdvecInitOp>;
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(cudaq::cc::StdvecInitOp init,
+                                PatternRewriter &rewriter) const override {
+    if (auto arrTy =
+            dyn_cast<cudaq::cc::ArrayType>(init.getBuffer().getType())) {
+      if (arrTy.isUnknownSize())
+        return failure();
+      if (auto len = init.getLength())
+        if (auto optInt = cudaq::opt::factory::getIntIfConstant(len))
+          if (*optInt == arrTy.getSize()) {
+            rewriter.replaceOpWithNewOp<cudaq::cc::StdvecInitOp>(
+                init, init.getType(), init.getBuffer());
+            return success();
+          }
+    }
+    return failure();
+  }
+};
+} // namespace
+
+void cudaq::cc::StdvecInitOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  patterns.add<CollapseCastToStdvecInit, FoldStdvecInit>(context);
+}
+
+LogicalResult cudaq::cc::StdvecInitOp::verify() {
+  Value buff = getBuffer();
+  auto buffTy = cast<cc::PointerType>(buff.getType());
+  auto buffEleTy = buffTy.getElementType();
+  if (auto arrTy = dyn_cast<cc::ArrayType>(buffEleTy)) {
+    if (arrTy.isUnknownSize()) {
+      if (!getLength())
+        return emitOpError("must specify a length.");
+    } else {
+      // Input buffer is an array of constant length. If there is a length
+      // argument provided, it must not exceed the length of the buffer.
+      if (auto len = getLength())
+        if (auto optInt = opt::factory::getIntIfConstant(len))
+          if (*optInt > arrTy.getSize())
+            return emitOpError("length override exceeds array length.");
+    }
+    buffEleTy = arrTy.getElementType();
+  }
+  // FIXME: For now leave the loophole that the input buffer may be a "void*" or
+  // "char*" and implicitly casted by this operation.
+  if (buffEleTy != NoneType::get(getContext()) &&
+      buffEleTy != IntegerType::get(getContext(), 8) &&
+      buffEleTy != cast<cc::SpanLikeType>(getType()).getElementType())
+    return emitOpError("element types must be the same.");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // StdvecDataOp
 //===----------------------------------------------------------------------===//
 
 namespace {
 struct ForwardStdvecInitData
     : public OpRewritePattern<cudaq::cc::StdvecDataOp> {
-  using Base = OpRewritePattern<cudaq::cc::StdvecDataOp>;
-  using Base::Base;
+  using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(cudaq::cc::StdvecDataOp data,
                                 PatternRewriter &rewriter) const override {
@@ -1083,9 +1321,8 @@ struct ForwardStdvecInitData
     // and unwrapped by stdvec_data is the same pointer value. This pattern will
     // arise after inlining, for example.
     if (auto ini = data.getStdvec().getDefiningOp<cudaq::cc::StdvecInitOp>()) {
-      Value cast = rewriter.create<cudaq::cc::CastOp>(
-          data.getLoc(), data.getType(), ini.getBuffer());
-      rewriter.replaceOp(data, cast);
+      rewriter.replaceOpWithNewOp<cudaq::cc::CastOp>(data, data.getType(),
+                                                     ini.getBuffer());
       return success();
     }
     return failure();
@@ -1110,11 +1347,19 @@ struct ForwardStdvecInitSize
 
   LogicalResult matchAndRewrite(cudaq::cc::StdvecSizeOp size,
                                 PatternRewriter &rewriter) const override {
-    if (auto ini = size.getStdvec().getDefiningOp<cudaq::cc::StdvecInitOp>()) {
-      Value cast = rewriter.create<cudaq::cc::CastOp>(
-          size.getLoc(), size.getType(), ini.getLength());
-      rewriter.replaceOp(size, cast);
-      return success();
+    if (auto init = size.getStdvec().getDefiningOp<cudaq::cc::StdvecInitOp>()) {
+      auto ty = size.getType();
+      if (Value len = init.getLength()) {
+        rewriter.replaceOpWithNewOp<cudaq::cc::CastOp>(size, ty, len);
+        return success();
+      }
+      if (auto arrTy =
+              dyn_cast<cudaq::cc::ArrayType>(init.getBuffer().getType()))
+        if (!arrTy.isUnknownSize()) {
+          rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(
+              size, arrTy.getSize(), ty);
+          return success();
+        }
     }
     return failure();
   }
@@ -1243,8 +1488,6 @@ LogicalResult cudaq::cc::LoopOp::verify() {
   if (hasPythonElse()) {
     if (isPostConditional())
       return emitOpError("post-conditional loop cannot have an else region");
-    if (!hasStep())
-      return emitOpError("python for-else must have step region");
     if (getElseEntryArguments().size() != initArgsSize)
       return emitOpError(
           "size of init args and else region args must be equal");
@@ -1292,7 +1535,7 @@ void cudaq::cc::LoopOp::print(OpAsmPrinter &p) {
     if (hasPythonElse()) {
       p << " else ";
       p.printRegion(getElseRegion(), /*printEntryBlockArgs=*/hasArguments(),
-                    /*printBlockTerminators=*/hasArguments());
+                    /*printBlockTerminators=*/true);
     }
   }
   p.printOptionalAttrDict((*this)->getAttrs(), {postCondAttrName()});
@@ -1629,9 +1872,10 @@ bool hasAllocation(Region &region) {
         if (mem.hasEffect<MemoryEffects::Allocate>())
           if (quantumAllocs || !isa<quake::AllocaOp>(op))
             return true;
-      for (auto &opReg : op.getRegions())
-        if (hasAllocation<quantumAllocs>(opReg))
-          return true;
+      if (!isa<cudaq::cc::ScopeOp>(op))
+        for (auto &opReg : op.getRegions())
+          if (hasAllocation<quantumAllocs>(opReg))
+            return true;
     }
   return false;
 }
@@ -1727,6 +1971,20 @@ void cudaq::cc::IfOp::build(OpBuilder &builder, OperationState &result,
   if (elseBuilder)
     elseBuilder(builder, result.location, *elseRegion);
   result.addOperands(cond);
+  result.addTypes(resultTypes);
+}
+
+void cudaq::cc::IfOp::build(OpBuilder &builder, OperationState &result,
+                            TypeRange resultTypes, Value cond,
+                            ValueRange linearVals, RegionBuilderFn thenBuilder,
+                            RegionBuilderFn elseBuilder) {
+  auto *thenRegion = result.addRegion();
+  auto *elseRegion = result.addRegion();
+  thenBuilder(builder, result.location, *thenRegion);
+  if (elseBuilder)
+    elseBuilder(builder, result.location, *elseRegion);
+  result.addOperands(cond);
+  result.addOperands(linearVals);
   result.addTypes(resultTypes);
 }
 
@@ -1891,6 +2149,58 @@ LogicalResult cudaq::cc::verifyConvergentLinearTypesInRegions(Operation *op) {
   return success();
 }
 
+namespace {
+struct KillRegionIfConstant : public OpRewritePattern<cudaq::cc::IfOp> {
+  using Base = OpRewritePattern<cudaq::cc::IfOp>;
+  using Base::Base;
+
+  // This rewrite will determine if the condition is constant. If it is, then it
+  // will elide the true or false region completely, depending on the constant's
+  // value.
+  LogicalResult matchAndRewrite(cudaq::cc::IfOp ifOp,
+                                PatternRewriter &rewriter) const override {
+    auto cond = ifOp.getCondition();
+    if (!ifOp.getResults().empty())
+      return failure();
+    auto con = cond.getDefiningOp<arith::ConstantIntOp>();
+    if (!con)
+      return failure();
+    auto val = con.value();
+    auto loc = ifOp.getLoc();
+    auto truth = rewriter.create<arith::ConstantIntOp>(loc, 1, 1);
+    Region *newRegion = nullptr;
+    if (val) {
+      // The else block, if any, is dead.
+      if (ifOp.getElseRegion().empty())
+        return failure();
+      newRegion = &ifOp.getThenRegion();
+    } else {
+      // The then block is dead.
+      newRegion = &ifOp.getElseRegion();
+      if (newRegion->empty()) {
+        // If there was no else, then build an empty dummy Region.
+        OpBuilder::InsertionGuard guard(rewriter);
+        Block *block = new Block();
+        rewriter.setInsertionPointToEnd(block);
+        rewriter.create<cudaq::cc::ContinueOp>(loc);
+        newRegion->push_back(block);
+      }
+    }
+    rewriter.replaceOpWithNewOp<cudaq::cc::IfOp>(
+        ifOp, ifOp.getResultTypes(), truth,
+        [&](OpBuilder &, Location, Region &region) {
+          region.takeBody(*newRegion);
+        });
+    return success();
+  }
+};
+} // namespace
+
+void cudaq::cc::IfOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *context) {
+  patterns.add<KillRegionIfConstant>(context);
+}
+
 //===----------------------------------------------------------------------===//
 // CreateLambdaOp
 //===----------------------------------------------------------------------===//
@@ -2039,6 +2349,100 @@ MutableOperandRange cudaq::cc::ConditionOp::getMutableSuccessorOperands(
 }
 
 //===----------------------------------------------------------------------===//
+// NoInlineCallOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult cudaq::cc::NoInlineCallOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  // Check that the callee attribute was specified.
+  auto fnAttr = (*this)->getAttrOfType<FlatSymbolRefAttr>("callee");
+  if (!fnAttr)
+    return emitOpError("requires a 'callee' symbol reference attribute");
+  auto fn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, fnAttr);
+  if (!fn)
+    return emitOpError() << "'" << fnAttr.getValue()
+                         << "' does not reference a valid function";
+
+  // Verify that the operand and result types match the callee.
+  auto fnType = fn.getFunctionType();
+  if (fnType.getNumInputs() != getNumOperands())
+    return emitOpError("incorrect number of operands for callee");
+
+  for (unsigned i = 0, e = fnType.getNumInputs(); i != e; ++i)
+    if (getOperand(i).getType() != fnType.getInput(i))
+      return emitOpError("operand type mismatch: expected operand type ")
+             << fnType.getInput(i) << ", but provided "
+             << getOperand(i).getType() << " for operand number " << i;
+
+  if (fnType.getNumResults() != getNumResults())
+    return emitOpError("incorrect number of results for callee");
+
+  for (unsigned i = 0, e = fnType.getNumResults(); i != e; ++i)
+    if (getResult(i).getType() != fnType.getResult(i)) {
+      auto diag = emitOpError("result type mismatch at index ") << i;
+      diag.attachNote() << "      op result types: " << getResultTypes();
+      diag.attachNote() << "function result types: " << fnType.getResults();
+      return diag;
+    }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DeviceCallOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult cudaq::cc::DeviceCallOp::verify() {
+  if (getNumBlocks().size() > 3)
+    return emitOpError(
+        "the number of blocks  must have a maximum dimension of 3");
+  if (getNumThreadsPerBlock().size() > 3)
+    return emitOpError(
+        "the number of threads per block must have a maximum dimension of 3");
+  return success();
+}
+
+LogicalResult
+cudaq::cc::DeviceCallOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  // Check that the callee attribute was specified.
+  auto fnAttr = (*this)->getAttrOfType<FlatSymbolRefAttr>("callee");
+  if (!fnAttr)
+    return emitOpError("requires a 'callee' symbol reference attribute");
+  func::FuncOp fn =
+      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, fnAttr);
+  if (!fn)
+    return emitOpError() << "'" << fnAttr.getValue()
+                         << "' does not reference a valid function";
+
+  // Verify that the operand and result types match the callee.
+  auto fnType = fn.getFunctionType();
+  if (fnType.getNumInputs() != getArgs().size())
+    return emitOpError("incorrect number of operands for callee");
+
+  for (unsigned i = 0, e = fnType.getNumInputs(); i != e; ++i)
+    if (getArgs()[i].getType() != fnType.getInput(i)) {
+      return emitOpError("operand type mismatch: expected operand type ")
+             << fnType.getInput(i) << ", but provided "
+             << getArgs()[i].getType() << " for operand number " << i;
+    }
+
+  if (fnType.getResults().empty() && getNumResults() == 0)
+    return success();
+
+  if (fnType.getNumResults() != getNumResults())
+    return emitOpError("number of results does not agree");
+
+  for (auto [myRes, resTy] : llvm::zip(getResults(), fnType.getResults()))
+    if (myRes.getType() != resTy) {
+      auto diag = emitOpError("result type mismatch ");
+      diag.attachNote() << "      op result types: " << myRes.getType();
+      diag.attachNote() << "function result types: " << resTy;
+      return diag;
+    }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // OffsetOfOp
 //===----------------------------------------------------------------------===//
 
@@ -2102,6 +2506,19 @@ struct FoldTrivialOffsetOf : public OpRewritePattern<cudaq::cc::OffsetOfOp> {
 void cudaq::cc::OffsetOfOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns.add<FoldTrivialOffsetOf>(context);
+}
+
+//===----------------------------------------------------------------------===//
+// ReifySpanOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult cudaq::cc::ReifySpanOp::verify() {
+  auto conArr = getElements().getDefiningOp<cudaq::cc::ConstantArrayOp>();
+  if (!conArr && !isa<BlockArgument>(getElements()))
+    return emitOpError("requires a constant array argument.");
+  if (conArr.arrayDimension() != spanDimension())
+    return emitOpError("input array dimension must be same as span dimension.");
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2175,6 +2592,16 @@ struct ReplaceConstantSizes : public OpRewritePattern<cudaq::cc::SizeOfOp> {
     auto inpTy = sizeOp.getInputType();
     if (Value v = cudaq::cc::getByteSizeOfType(rewriter, sizeOp.getLoc(), inpTy,
                                                /*useSizeOf=*/false)) {
+      if (v.getType() != sizeOp.getType()) {
+        auto vSz = v.getType().getIntOrFloatBitWidth();
+        auto sizeOpSz = sizeOp.getType().getIntOrFloatBitWidth();
+        auto loc = sizeOp.getLoc();
+        if (sizeOpSz < vSz)
+          v = rewriter.create<cudaq::cc::CastOp>(loc, sizeOp.getType(), v);
+        else
+          v = rewriter.create<cudaq::cc::CastOp>(
+              loc, sizeOp.getType(), v, cudaq::cc::CastOpMode::Unsigned);
+      }
       rewriter.replaceOp(sizeOp, v);
       return success();
     }
@@ -2295,6 +2722,50 @@ LogicalResult cudaq::cc::UnwindReturnOp::verify() {
   for (auto p : llvm::zip(getOperands().getTypes(), resultTypes))
     if (std::get<0>(p) != std::get<1>(p))
       return emitOpError("argument type mismatch with function/lambda result");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// VarargCallOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+cudaq::cc::VarargCallOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  // Check that the callee attribute was specified.
+  auto fnAttr = (*this)->getAttrOfType<FlatSymbolRefAttr>("callee");
+  if (!fnAttr)
+    return emitOpError("requires a 'callee' symbol reference attribute");
+  LLVM::LLVMFuncOp fn =
+      symbolTable.lookupNearestSymbolFrom<LLVM::LLVMFuncOp>(*this, fnAttr);
+  if (!fn)
+    return emitOpError() << "'" << fnAttr.getValue()
+                         << "' does not reference a valid LLVM function";
+
+  // Verify that the operand and result types match the callee.
+  auto fnType = fn.getFunctionType();
+  if (fnType.getNumParams() > getNumOperands())
+    return emitOpError("incorrect number of operands for callee");
+
+  for (unsigned i = 0, e = fnType.getNumParams(); i != e; ++i)
+    if (getOperand(i).getType() != fnType.getParams()[i]) {
+      return emitOpError("operand type mismatch: expected operand type ")
+             << fnType.getParams()[i] << ", but provided "
+             << getOperand(i).getType() << " for operand number " << i;
+    }
+
+  if (fnType.getReturnType() == LLVM::LLVMVoidType::get(getContext()) &&
+      getNumResults() == 0)
+    return success();
+
+  if (getNumResults() > 1)
+    return emitOpError("wrong number of result types: ") << getNumResults();
+
+  if (getResult(0).getType() != fnType.getReturnType()) {
+    auto diag = emitOpError("result type mismatch ");
+    diag.attachNote() << "      op result types: " << getResultTypes();
+    diag.attachNote() << "function result types: " << fnType.getReturnType();
+    return diag;
+  }
   return success();
 }
 

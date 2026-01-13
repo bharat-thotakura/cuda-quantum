@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -16,8 +16,10 @@ config:
   link-libs: ["-lcudaq-rest-qpu"]
   # Tell NVQ++ to generate glue code to set the target backend name
   gen-target-backend: true
-  # Define the lowering pipeline
-  platform-lowering-config: "func.func(const-prop-complex,canonicalize,cse,lift-array-alloc),globalize-array-values,func.func(state-prep),unitary-synthesis,canonicalize,apply-op-specialization,aggressive-early-inlining,unrolling-pipeline,func.func(lower-to-cfg),canonicalize,func.func(multicontrol-decomposition),decomposition{enable-patterns=SToR1,TToR1,CCZToCX,CRyToCX,CRxToCX,R1AdjToR1,RxAdjToRx,RyAdjToRy,RzAdjToRz},func.func(memtoreg{quantum=0}),symbol-dce"
+  # Add preprocessor defines to compilation
+  preprocessor-defines: ["-D CUDAQ_QUANTUM_DEVICE"]
+  # Define the JIT lowering pipeline
+  jit-mid-level-pipeline: "lower-to-cfg,decomposition{enable-patterns=SToR1,TToR1,CCZToCX,CRyToCX,CRxToCX,R1AdjToR1,RxAdjToRx,RyAdjToRy,RzAdjToRz,ExpPauliDecomposition},quake-to-cc-prep,func.func(memtoreg{quantum=0})"
   # Tell the rest-qpu that we are generating OpenQASM 2.0.
   codegen-emission: qasm2
   # Library mode is only for simulators, physical backends must turn this off

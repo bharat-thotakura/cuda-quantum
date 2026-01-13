@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -46,13 +46,13 @@ public:
                void *args, std::uint64_t voidStarSize,
                std::uint64_t resultOffset,
                const std::vector<void *> &rawArgs) override {
-    cudaq::info("FermioniqBaseQPU launching kernel ({})", kernelName);
+    CUDAQ_INFO("FermioniqBaseQPU launching kernel ({})", kernelName);
 
     // TODO future iterations of this should support non-void return types.
     if (!executionContext)
       throw std::runtime_error(
           "Remote rest execution can only be performed via cudaq::sample(), "
-          "cudaq::observe(), or cudaq::draw().");
+          "cudaq::observe(), or cudaq::contrib::draw().");
 
     // When the user issues an observe call, we don't want to use the default
     // cuda-quantum behaviour that splits up the circuit into several ansatz
@@ -78,16 +78,16 @@ public:
       auto user_data = nlohmann::json::object();
       auto obs = nlohmann::json::array();
 
-      spin->for_each_term([&](spin_op &term) {
+      for (const auto &term : spin) {
         auto spin_op = nlohmann::json::object();
 
         auto terms = nlohmann::json::array();
 
-        auto termStr = term.to_string(false);
+        auto termStr = term.get_term_id();
 
         terms.push_back(termStr);
 
-        auto coeff = term.get_coefficient();
+        auto coeff = term.evaluate_coefficient();
         auto coeff_str =
             fmt::format("{}{}{}j", coeff.real(), coeff.imag() < 0.0 ? "-" : "+",
                         std::fabs(coeff.imag()));
@@ -95,7 +95,7 @@ public:
         terms.push_back(coeff_str);
 
         obs.push_back(terms);
-      });
+      }
 
       user_data["observable"] = obs;
 

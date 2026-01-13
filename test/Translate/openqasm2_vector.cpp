@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,7 +7,7 @@
  ******************************************************************************/
 
 // clang-format off
-// RUN: cudaq-quake  %s | cudaq-opt -canonicalize -cse -lift-array-alloc -globalize-array-values -state-prep | cudaq-translate --convert-to=openqasm2 | FileCheck %s
+// RUN: cudaq-quake  %s | cudaq-opt -canonicalize -cse -lift-array-alloc -globalize-array-values -canonicalize -state-prep | cudaq-translate --convert-to=openqasm2 | FileCheck %s
 // clang-format on
 
 #include <cudaq.h>

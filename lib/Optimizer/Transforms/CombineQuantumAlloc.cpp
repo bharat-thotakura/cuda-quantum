@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -62,11 +62,12 @@ public:
               alloc.getLoc(), os.first, rewriter.getI64Type());
           Value hi = rewriter.create<arith::ConstantIntOp>(
               alloc.getLoc(), os.first + os.second - 1, rewriter.getI64Type());
+          // trying to print alloc after the replace gives a segfault
+          LLVM_DEBUG(llvm::dbgs() << "replace " << alloc);
           [[maybe_unused]] Value subveq =
               rewriter.replaceOpWithNewOp<quake::SubVeqOp>(
                   alloc, alloc.getType(), analysis.newAlloc, lo, hi);
-          LLVM_DEBUG(llvm::dbgs()
-                     << "replace " << alloc << " with " << subveq << '\n');
+          LLVM_DEBUG(llvm::dbgs() << " with " << subveq << '\n');
           return success();
         }
         if (auto sty = dyn_cast<quake::StruqType>(alloc.getType())) {

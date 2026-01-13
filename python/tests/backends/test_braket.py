@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -20,11 +20,14 @@ pytestmark = pytest.mark.skip("Amazon Braket credentials required")
 
 @pytest.fixture(scope="session", autouse=True)
 def do_something():
-    device_arn = "arn:aws:braket:::device/quantum-simulator/amazon/sv1"
-    cudaq.set_target("braket", machine=device_arn)
+    cudaq.set_target("braket")
     yield "Running the tests."
     cudaq.__clearKernelRegistries()
     cudaq.reset_target()
+
+
+def assert_close(got) -> bool:
+    return got < -1.5 and got > -1.9
 
 
 def test_simple_kernel():
@@ -100,8 +103,8 @@ def test_all_gates():
         rz(np.pi, q)
         s(q)
         t(q)
-        # mx(q) ## Unsupported
-        # my(q) ## Unsupported
+        mx(q)
+        ## my(q) # not supported since the default rewriter uses `sdg`
         mz(q)
 
     # Test here is that this runs
@@ -245,17 +248,31 @@ def test_observe():
         x(qreg[0])
         ry(theta, qreg[1])
         x.ctrl(qreg[1], qreg[0])
-        ## NOTE: Measure required since 'Device requires all qubits in the program to be measured.'
-        mz(qreg)
 
     # Define its spin Hamiltonian.
     hamiltonian = 5.907 - 2.1433 * spin.x(0) * spin.x(1) - 2.1433 * spin.y(
         0) * spin.y(1) + .21829 * spin.z(0) - 6.125 * spin.z(1)
 
-    with pytest.raises(RuntimeError) as e:
-        cudaq.observe(ansatz, hamiltonian, .59, shots_count=100)
-    assert "observe specification violated for 'ansatz': kernels passed to observe cannot have measurements specified." in repr(
-        e)
+    res = cudaq.observe(ansatz, hamiltonian, .59, shots_count=2000)
+    print(res.expectation())
+    assert assert_close(res.expectation())
+
+    # Can also invoke `sample` on the same kernel
+    cudaq.sample(ansatz, .59).dump()
+
+
+def test_observe_async():
+
+    @cudaq.kernel
+    def kernel():
+        qubits = cudaq.qvector(2)
+        x(qubits[0])
+
+    hamiltonian = spin.z(0) * spin.z(1)
+    future = cudaq.observe_async(kernel, hamiltonian, shots_count=1)
+    result = future.get()
+    print(result.expectation())
+    assert result.expectation() == -1.0
 
 
 def test_custom_operations():
@@ -408,6 +425,48 @@ def test_state_prep():
     assert '00' in counts
 
 
+def test_state_synthesis_from_simulator():
+
+    @cudaq.kernel
+    def kernel(state: cudaq.State):
+        qubits = cudaq.qvector(state)
+        mz(qubits)
+
+    state = cudaq.State.from_data(
+        np.array([1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.],
+                 dtype=cudaq.complex()))
+
+    counts = cudaq.sample(kernel, state)
+    assert "00" in counts
+    assert "10" in counts
+    assert len(counts) == 2
+
+
+def test_state_synthesis():
+
+    @cudaq.kernel
+    def init(n: int):
+        q = cudaq.qvector(n)
+        x(q[0])
+
+    @cudaq.kernel
+    def kernel1(s: cudaq.State):
+        q = cudaq.qvector(s)
+        x(q[1])
+
+    @cudaq.kernel
+    def kernel2(s: cudaq.State):
+        q = cudaq.qvector(s)
+        x(q[1])
+        mz(q)
+
+    s = cudaq.get_state(init, 2)
+    s = cudaq.get_state(kernel1, s)
+    counts = cudaq.sample(kernel2, s)
+    assert '10' in counts
+    assert len(counts) == 1
+
+
 @pytest.mark.parametrize("device_arn", [
     "arn:aws:braket:::device/quantum-simulator/amazon/dm1",
     "arn:aws:braket:::device/quantum-simulator/amazon/tn1"
@@ -417,6 +476,44 @@ def test_other_simulators(device_arn):
     test_qvector_kernel()
     test_builder_sample()
     cudaq.reset_target()
+
+
+@pytest.mark.parametrize("polling_interval_ms", [10, 100])
+def test_polling_interval(polling_interval_ms):
+    cudaq.set_target("braket", polling_interval_ms=polling_interval_ms)
+    test_qvector_kernel()
+    cudaq.reset_target()
+
+
+def test_exp_pauli():
+
+    @cudaq.kernel
+    def test():
+        q = cudaq.qvector(2)
+        exp_pauli(1.0, q, "XX")
+        mz(q)
+
+    counts = cudaq.sample(test)
+    counts.dump()
+    assert '00' in counts
+    assert '11' in counts
+    assert not '01' in counts
+    assert not '10' in counts
+
+
+def test_toffoli():
+
+    @cudaq.kernel
+    def kernel():
+        q = cudaq.qvector(3)
+        x(q)
+        x.ctrl([q[0], q[1]], q[2])
+        mz(q)
+
+    counts = cudaq.sample(kernel)
+    counts.dump()
+    assert '110' in counts
+    assert len(counts) == 1
 
 
 # leave for gdb debugging

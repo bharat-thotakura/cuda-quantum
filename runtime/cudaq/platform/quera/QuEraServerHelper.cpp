@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -12,24 +12,15 @@
 namespace cudaq {
 
 void QuEraServerHelper::initialize(BackendConfig config) {
-  cudaq::info("Initializing QuEra via Amazon Braket.");
-
+  CUDAQ_INFO("Initializing QuEra via Amazon Braket.");
   // Hard-coded for now
-  auto machine = AQUILA;
-  auto deviceArn = AQUILA_ARN;
-
-  cudaq::info("Running on device {}", deviceArn);
-
+  auto deviceArn = "arn:aws:braket:us-east-1::device/qpu/quera/Aquila";
+  CUDAQ_INFO("Running on device {}", deviceArn);
   config["defaultBucket"] = getValueOrDefault(config, "default_bucket", "");
   config["deviceArn"] = deviceArn;
-  config["qubits"] = deviceQubitCounts.contains(deviceArn)
-                         ? deviceQubitCounts.at(deviceArn)
-                         : DEFAULT_QUBIT_COUNT;
   if (!config["shots"].empty())
     this->setShots(std::stoul(config["shots"]));
-
   parseConfigForCommonParams(config);
-
   // Move the passed config into the member variable backendConfig
   backendConfig = std::move(config);
 }
@@ -54,8 +45,8 @@ QuEraServerHelper::createJob(std::vector<KernelExecution> &circuitCodes) {
 
     tasks.push_back(taskRequest);
   }
-  cudaq::info("Created job payload for QuEra, targeting device {}",
-              backendConfig.at("deviceArn"));
+  CUDAQ_INFO("Created job payload for QuEra, targeting device {}",
+             backendConfig.at("deviceArn"));
   return ret;
 }
 

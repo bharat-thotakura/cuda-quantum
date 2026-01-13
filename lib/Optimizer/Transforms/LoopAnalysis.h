@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -14,17 +14,29 @@ namespace cudaq::opt {
 
 // Loops that are transformed into normal form have this attribute.
 static constexpr char NormalizedLoopAttr[] = "normalized";
+static constexpr char DeadLoopAttr[] = "dead";
 
 struct LoopComponents {
   LoopComponents() = default;
 
   // Get the induction expression of the comparison.
-  mlir::Value getCompareInduction();
+  mlir::Value getCompareInduction() const;
 
-  bool stepIsAnAddOp();
-  bool shouldCommuteStepOp();
-  bool isClosedIntervalForm();
-  bool isLinearExpr();
+  bool stepIsAnAddOp() const;
+  bool shouldCommuteStepOp() const;
+  bool isClosedIntervalForm() const;
+  bool isLinearExpr() const;
+  std::optional<std::size_t> getIterationsConstant() const;
+
+  // Determine if the condition is always true. e.g., `x uge 0`.
+  bool hasAlwaysTrueCondition() const;
+  // Determine if the condition is always false. e.g., `x ult 0`.
+  bool hasAlwaysFalseCondition() const;
+  bool hasInvariantCondition() const {
+    return hasAlwaysTrueCondition() || hasAlwaysFalseCondition();
+  }
+
+  std::int64_t extendValue(unsigned width, std::size_t val) const;
 
   unsigned induction = 0;
   mlir::Value initialValue;
@@ -50,6 +62,7 @@ struct LoopComponents {
 /// Does boundary test defines a semi-open interval?
 bool isSemiOpenPredicate(mlir::arith::CmpIPredicate p);
 bool isUnsignedPredicate(mlir::arith::CmpIPredicate p);
+bool isSignedPredicate(mlir::arith::CmpIPredicate p);
 
 /// A counted loop is defined to be a loop that will execute some compile-time
 /// constant number of iterations. We recognize a normalized, semi-open interval
@@ -61,7 +74,9 @@ bool isUnsignedPredicate(mlir::arith::CmpIPredicate p);
 bool isaCountedLoop(cc::LoopOp op, bool allowClosedInterval = true);
 
 bool loopContainsBreak(cc::LoopOp op);
-bool isaConstantUpperBoundLoop(cc::LoopOp op, bool allowClosedInterval = true);
+
+/// An indefinite counted loop is a counted loop which may have early exits.
+bool isaIndefiniteCountedLoop(cc::LoopOp op, bool allowClosedInterval = true);
 
 /// An invariant loop is defined to be a loop that will execute some run-time
 /// invariant number of iterations. We recognize a normalized, semi-open
@@ -74,6 +89,23 @@ bool isaConstantUpperBoundLoop(cc::LoopOp op, bool allowClosedInterval = true);
 bool isaInvariantLoop(cc::LoopOp op, bool allowClosedInterval = true,
                       bool allowEarlyExit = false, LoopComponents *c = nullptr);
 bool isaInvariantLoop(const LoopComponents &c, bool allowClosedInterval);
+
+/// An indefinite invariant loop is an invariant loop which may have early
+/// exits. The number of iterations will be at most the upper bound expression.
+/// We recognize the normalized, semi-open interval loop such as
+/// ```
+///   for(i = 0; i < invariant_expression; ++i) {
+///     ...
+///       break;
+///     ...
+///   }
+/// ```
+/// is a canonical indefinite loop.
+inline bool isaIndefiniteInvariantLoop(cc::LoopOp op,
+                                       bool allowClosedInterval = true,
+                                       LoopComponents *c = nullptr) {
+  return isaInvariantLoop(op, allowClosedInterval, /*allowEarlyExit=*/true, c);
+}
 
 // We expect the loop control value to have the following form.
 //
@@ -105,8 +137,9 @@ bool hasMonotonicControlInduction(cc::LoopOp loop, LoopComponents *c = nullptr);
 /// ```
 ///   for(i = start; i < stop; i += step)
 /// ```
-/// is a monotonic loop that must execute a number of iterations as given
-/// by the following equation. Early exits (break statements) are not permitted.
+/// is a (definite) monotonic loop that must execute a number of iterations as
+/// given by the following equation. Early exits (break statements) are
+/// permitted in \e indefinite monotonic loops.
 /// ```
 ///   let iterations = (stop - 1 - start + step) / step
 ///      iterations : if iterations > 0
@@ -116,6 +149,12 @@ bool hasMonotonicControlInduction(cc::LoopOp loop, LoopComponents *c = nullptr);
 /// be returned via \p c.
 bool isaMonotonicLoop(mlir::Operation *op, bool allowEarlyExit = false,
                       LoopComponents *c = nullptr);
+
+/// An indefinite monotonic loop is a monotonic loop that may have early exits.
+inline bool isaIndefiniteMonotonicLoop(mlir::Operation *op,
+                                       LoopComponents *c = nullptr) {
+  return isaMonotonicLoop(op, /*allowEarlyExit=*/true, c);
+}
 
 /// Recover the different subexpressions from the loop if it conforms to the
 /// pattern. Given a LoopOp where induction is in a register:

@@ -1,10 +1,15 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
+
+#pragma nv_diag_suppress = unrecognized_gcc_pragma
+#pragma nv_diag_suppress 186 // from fmt
+#pragma nv_diag_suppress 20013 // from eigen
+#pragma nv_diag_suppress 20015 // from eigen
 
 #include "CUDAQTestUtils.h"
 #include <cudaq/algorithm.h>

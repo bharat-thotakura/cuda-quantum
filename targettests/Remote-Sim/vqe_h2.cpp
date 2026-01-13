@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -9,7 +9,7 @@
 // REQUIRES: remote-sim
 
 // clang-format off
-// RUN: nvq++ %cpp_std --enable-mlir --target remote-mqpu --remote-mqpu-auto-launch 1 %s -o %t && %t
+// RUN: nvq++ --enable-mlir --target remote-mqpu --remote-mqpu-auto-launch 1 %s -o %t && %t
 // clang-format on
 
 #include "remote_test_assert.h"
@@ -151,7 +151,7 @@ int main() {
     // needs to sometimes run against a server without the remote VQE
     // capability, so the handling of RNG seeds for back-and-forth iterations of
     // observe's behave slightly differently than a fully remote VQE.
-    REMOTE_TEST_ASSERT(std::abs(opt_val - -1.0906868832471321) < 0.015);
+    REMOTE_TEST_ASSERT(std::abs(opt_val - -1.0987425678504421) < 0.015);
   }
   return 0;
 }

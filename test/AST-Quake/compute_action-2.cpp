@@ -1,12 +1,11 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-// REQUIRES: c++20
 // RUN: cudaq-quake %s | cudaq-opt --apply-op-specialization | FileCheck %s
 // RUN: cudaq-quake %s | cudaq-opt --lambda-lifting --canonicalize --apply-op-specialization -o %t && FileCheck --check-prefix=LAMBDA %s < %t && FileCheck --check-prefix=LAMBDA2 %s < %t
 
@@ -33,11 +32,10 @@ struct ctrlHeisenberg {
 };
 
 // CHECK-LABEL:   func.func private @__nvqpp__mlirgen__function_magic_func.
-// CHECK-SAME: .ctrl(%[[VAL_0:.*]]: !quake.veq<?>, %{{.*}}: !quake.veq<?>) {
+// CHECK-SAME: .ctrl(%[[VAL_0:.*]]: !quake.veq<?>, %{{.*}}: !quake.veq<?>) {{.*}}{
 // CHECK:           cc.scope {
 // CHECK:             cc.loop while {
 // CHECK:             } do {
-// CHECK:               cc.scope {
 // CHECK:                 cc.scope {
 // CHECK:                   cc.loop while {
 // CHECK:                   } do {
@@ -59,7 +57,6 @@ struct ctrlHeisenberg {
 // CHECK:                   } step {
 // CHECK:                   }
 // CHECK:                 }
-// CHECK:               }
 // CHECK:             } step {
 // CHECK:             }
 // CHECK:           }
@@ -82,21 +79,20 @@ struct ctrlHeisenberg {
 //===----------------------------------------------------------------------===//
 
 // LAMBDA-LABEL:   func.func private @__nvqpp__lifted.lambda.0.adj(
-// LAMBDA-SAME:      %{{[^:]*}}: !cc.ptr<i32>, %{{[^:]*}}: !quake.veq<?>, %{{[^:]*}}: i32) {
+// LAMBDA-SAME:      %{{[^:]*}}: !cc.ptr<i32>, %{{[^:]*}}: !quake.veq<?>, %{{[^:]*}}: i32) {{.*}}{
 // LAMBDA:           quake.x [%{{.*}}] %{{.*}} : (!quake.ref, !quake.ref) -> ()
 // LAMBDA:           return
 
 // LAMBDA2-LABEL:   func.func private @__nvqpp__lifted.lambda.1.ctrl(
-// LAMBDA2-SAME:      %[[VAL_0:.*]]: !quake.veq<?>, %{{.*}}: !cc.ptr<i32>, %{{.*}}: i32, %{{.*}}: !quake.veq<?>, %{{.*}}: f64) {
+// LAMBDA2-SAME:      %[[VAL_0:.*]]: !quake.veq<?>, %{{.*}}: !cc.ptr<i32>, %{{.*}}: i32, %{{.*}}: !quake.veq<?>, %{{.*}}: f64) {{.*}}{
 // LAMBDA2:           quake.rz (%{{.*}}) [%[[VAL_0]]] %{{.*}} : (f64, !quake.veq<?>, !quake.ref) -> ()
 // LAMBDA2:           return
 
 // LAMBDA-LABEL:   func.func private @__nvqpp__mlirgen__function_magic_func.
-// LAMBDA-SAME:    .ctrl(%[[VAL_0:.*]]: !quake.veq<?>, %[[VAL_1:.*]]: !quake.veq<?>) {
+// LAMBDA-SAME:    .ctrl(%[[VAL_0:.*]]: !quake.veq<?>, %[[VAL_1:.*]]: !quake.veq<?>) {{.*}}{
 // LAMBDA:           cc.scope {
 // LAMBDA:             cc.loop while {
 // LAMBDA:             } do {
-// LAMBDA:               cc.scope {
 // LAMBDA:                 cc.scope {
 // LAMBDA:                   cc.loop while {
 // LAMBDA:                   } do {
@@ -115,7 +111,6 @@ struct ctrlHeisenberg {
 // LAMBDA:                   } step {
 // LAMBDA:                   }
 // LAMBDA:                 }
-// LAMBDA:               }
 // LAMBDA:             } step {
 // LAMBDA:             }
 // LAMBDA:           }
@@ -131,8 +126,7 @@ struct ctrlHeisenberg {
 // LAMBDA:         }
 
 // LAMBDA-LABEL:   func.func private @__nvqpp__lifted.lambda.0(
-// LAMBDA-SAME:      %[[VAL_0:.*]]: !cc.ptr<i32>, %[[VAL_1:.*]]: !quake.veq<?>, %{{.*}}: i32) {
+// LAMBDA-SAME:      %[[VAL_0:.*]]: !cc.ptr<i32>, %[[VAL_1:.*]]: !quake.veq<?>, %{{.*}}: i32) {{.*}}{
 // LAMBDA:           quake.x [%{{.*}}] %{{.*}} : (!quake.ref, !quake.ref) -> ()
 // LAMBDA:           return
 // LAMBDA:         }
-

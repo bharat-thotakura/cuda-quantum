@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -119,7 +119,7 @@ state::~state() {
   // Current use count is 1, so the
   // shared_ptr is about to go out of scope,
   // there are no users. Delete the state data.
-  if (internal.use_count() == 1)
+  if (internal && internal.use_count() == 1)
     internal->destroyState();
 }
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -82,7 +82,8 @@ T getValueOrThrow(llvm::Expected<T> valOrErr,
 // pointers into the code objects inside the JIT.
 void clearRegOpsAndDestroyJIT(std::unique_ptr<llvm::orc::LLJIT> &jit) {
   cudaq::getExecutionManager()->clearRegisteredOperations();
-  jit.release();
+  // Destroys the LLJIT object
+  jit.reset();
 }
 
 class RemoteRestRuntimeServer : public cudaq::RemoteRuntimeServer {
@@ -167,69 +168,12 @@ public:
 
           std::string mutableReq;
           for (const auto &[k, v] : headers)
-            cudaq::info("Request Header: {} : {}", k, v);
-          // Checking if this request has its body sent on as NVCF assets.
-          const auto dirIter = headers.find("NVCF-ASSET-DIR");
-          const auto assetIdIter = headers.find("NVCF-FUNCTION-ASSET-IDS");
-          if (dirIter != headers.end() && assetIdIter != headers.end()) {
-            const std::string dir = dirIter->second;
-            const auto ids = cudaq::split(assetIdIter->second, ',');
-            if (ids.size() != 1) {
-              json js;
-              js["status"] =
-                  fmt::format("Invalid asset Id data: {}", assetIdIter->second);
-              return js;
-            }
-            // Load the asset file
-            std::filesystem::path assetFile =
-                std::filesystem::path(dir) / ids[0];
-            if (!std::filesystem::exists(assetFile)) {
-              json js;
-              js["status"] = fmt::format("Unable to find the asset file {}",
-                                         assetFile.string());
-              return js;
-            }
-            std::ifstream t(assetFile);
-            std::string requestFromFile((std::istreambuf_iterator<char>(t)),
-                                        std::istreambuf_iterator<char>());
-            mutableReq = requestFromFile;
-          } else {
-            mutableReq = reqBody;
-          }
+            CUDAQ_INFO("Request Header: {} : {}", k, v);
+          mutableReq = reqBody;
 
           if (m_hasMpi)
             cudaq::mpi::broadcast(mutableReq, 0);
           auto resultJs = processRequest(mutableReq);
-          // Check whether we have a limit in terms of response size.
-          if (headers.contains("NVCF-MAX-RESPONSE-SIZE-BYTES")) {
-            const std::size_t maxResponseSizeBytes = std::stoll(
-                headers.find("NVCF-MAX-RESPONSE-SIZE-BYTES")->second);
-            if (resultJs.dump().size() > maxResponseSizeBytes) {
-              // If the response size is larger than the limit, write it to the
-              // large output directory rather than sending it back as an HTTP
-              // response.
-              const auto outputDirIter = headers.find("NVCF-LARGE-OUTPUT-DIR");
-              const auto reqIdIter = headers.find("NVCF-REQID");
-              if (outputDirIter == headers.end() ||
-                  reqIdIter == headers.end()) {
-                json js;
-                js["status"] =
-                    "Failed to locate output file location for large response.";
-                return js;
-              }
-
-              const std::string outputDir = outputDirIter->second;
-              const std::string fileName = reqIdIter->second + "_result.json";
-              const std::filesystem::path outputFile =
-                  std::filesystem::path(outputDir) / fileName;
-              std::ofstream file(outputFile.string());
-              file << resultJs.dump();
-              file.flush();
-              json js;
-              js["resultFile"] = fileName;
-              return js;
-            }
-          }
 
           return resultJs;
         });
@@ -325,7 +269,8 @@ public:
         gradient->setKernel(fnWrapper);
 
       bool requiresGrad = optimizer.requiresGradients();
-      auto theSpin = **io_context.spin;
+      auto theSpin = *io_context.spin;
+      assert(cudaq::spin_op::canonicalize(theSpin) == theSpin);
 
       result = optimizer.optimize(n_params, [&](const std::vector<double> &x,
                                                 std::vector<double> &grad_vec) {
@@ -404,7 +349,6 @@ public:
                   platform.set_exec_ctx(&io_context);
               });
           io_context.result = counts;
-          platform.set_exec_ctx(&io_context);
         } else {
           // If no conditionals, nothing special to do for library mode
           platform.set_exec_ctx(&io_context);
@@ -414,11 +358,13 @@ public:
           clearRegOpsAndDestroyJIT(llvmJit);
           llvmJit = cudaq::invokeWrappedKernel(ir, std::string(kernelName),
                                                kernelArgs, argsSize);
+          platform.reset_exec_ctx();
         }
       } else {
         platform.set_exec_ctx(&io_context);
         llvmJit = cudaq::invokeWrappedKernel(ir, std::string(kernelName),
                                              kernelArgs, argsSize);
+        platform.reset_exec_ctx();
       }
     } else {
       platform.set_exec_ctx(&io_context);
@@ -440,13 +386,29 @@ public:
                              platform.set_exec_ctx(&io_context);
                          });
         io_context.result = counts;
-        platform.set_exec_ctx(&io_context);
+      } else if (io_context.name == "run") {
+        // Handle cudaq::run: it should be executed in a context-free manner;
+        // the output log is accumulated in the simulator output log.
+        platform.reset_exec_ctx();
+        //  Clear the outputLog.
+        auto *circuitSimulator = nvqir::getCircuitSimulatorInternal();
+        circuitSimulator->outputLog.clear();
+        // Invoke the kernel multiple times.
+        invokeMlirKernel(io_context, m_mlirContext, ir, requestInfo.passes,
+                         std::string(kernelName), io_context.shots);
+        // Save the output log to the result buffer to be sent back to the
+        // client.
+        io_context.invocationResultBuffer.assign(
+            circuitSimulator->outputLog.c_str(),
+            circuitSimulator->outputLog.c_str() +
+                circuitSimulator->outputLog.size());
+        circuitSimulator->outputLog.clear();
       } else {
         invokeMlirKernel(io_context, m_mlirContext, ir, requestInfo.passes,
                          std::string(kernelName));
+        platform.reset_exec_ctx();
       }
     }
-    platform.reset_exec_ctx();
     // Clear the registered operations before the `llvmJit` goes out of scope
     // so that destruction of registered operations doesn't cause segfaults
     // during shutdown.
@@ -458,7 +420,7 @@ protected:
   std::unique_ptr<ExecutionEngine>
   jitMlirCode(ModuleOp currentModule, const std::vector<std::string> &passes,
               const std::vector<std::string> &extraLibPaths = {}) {
-    cudaq::info("Running jitCode.");
+    CUDAQ_INFO("Running jitCode.");
     auto module = currentModule.clone();
     ExecutionEngineOptions opts;
     opts.transformer = [](llvm::Module *m) { return llvm::ErrorSuccess(); };
@@ -466,7 +428,7 @@ protected:
     opts.jitCodeGenOptLevel = llvm::CodeGenOpt::None;
     SmallVector<StringRef, 4> sharedLibs;
     for (auto &lib : extraLibPaths) {
-      cudaq::info("Extra library loaded: {}", lib);
+      CUDAQ_INFO("Extra library loaded: {}", lib);
       sharedLibs.push_back(lib);
     }
     opts.sharedLibPaths = sharedLibs;
@@ -490,7 +452,7 @@ protected:
         throw std::runtime_error(
             "Remote rest platform: applying IR passes failed.");
 
-      cudaq::info("- Pass manager was applied.");
+      CUDAQ_INFO("- Pass manager was applied.");
     }
     // Verify MLIR conforming to the NVQIR-spec (known runtime functions and/or
     // QIR functions)
@@ -516,9 +478,9 @@ protected:
           cudaq::opt::createVerifyNVQIRCallOpsPass(allFunctionNames));
       if (failed(pm.run(module)))
         throw std::runtime_error(
-            "Failed to IR compliance verification against NVQIR runtime.");
+            "Failed check to verify IR compliance for NVQIR runtime.");
 
-      cudaq::info("- Finish IR input verification.");
+      CUDAQ_INFO("- Finish IR input verification.");
     }
 
     opts.llvmModuleBuilder =
@@ -534,11 +496,11 @@ protected:
       return llvmModule;
     };
 
-    cudaq::info("- Creating the MLIR ExecutionEngine");
+    CUDAQ_INFO("- Creating the MLIR ExecutionEngine");
     auto uniqueJit =
         getValueOrThrow(ExecutionEngine::create(module, opts),
                         "Failed to create MLIR JIT ExecutionEngine");
-    cudaq::info("- MLIR ExecutionEngine created successfully.");
+    CUDAQ_INFO("- MLIR ExecutionEngine created successfully.");
     return uniqueJit;
   }
 
@@ -620,8 +582,7 @@ protected:
     const auto simLibPath =
         cudaqLibPath.parent_path() /
         fmt::format("libnvqir-{}.{}", simulatorName, libSuffix);
-    cudaq::info("Request simulator {} at {}", simulatorName,
-                simLibPath.c_str());
+    CUDAQ_INFO("Request simulator {} at {}", simulatorName, simLibPath.c_str());
     void *simLibHandle = dlopen(simLibPath.c_str(), RTLD_GLOBAL | RTLD_NOW);
     if (!simLibHandle) {
       char *error_msg = dlerror();
@@ -685,7 +646,7 @@ protected:
         // level.
         cudaq::log(os.str());
       } else {
-        cudaq::info(os.str());
+        CUDAQ_INFO(os.str());
       }
 
       // Verify REST API version of the incoming request
@@ -817,64 +778,6 @@ protected:
   }
 };
 
-// Runtime server for NVCF
-class NvcfRuntimeServer : public RemoteRestRuntimeServer {
-public:
-  NvcfRuntimeServer() : RemoteRestRuntimeServer() { exitAfterJob = true; }
-
-protected:
-  virtual bool filterRequest(const cudaq::RestRequest &in_request,
-                             std::string &outValidationMessage) const override {
-    // We only support MLIR payload on the NVCF server.
-    if (in_request.format != cudaq::CodeFormat::MLIR) {
-      outValidationMessage =
-          "Unsupported input format: only CUDA-Q MLIR data is allowed.";
-      return false;
-    }
-
-    if (!in_request.passes.empty()) {
-      outValidationMessage =
-          "Unsupported passes: server-side compilation passes are not allowed.";
-      return false;
-    }
-
-    return true;
-  }
-
-protected:
-  virtual json processRequest(const std::string &reqBody,
-                              bool forceLog = false) override {
-    // When calling RemoteRestRuntimeServer::processRequest, set forceLog=true
-    // so that incoming requests are always logged, regardless of what log level
-    // we're running the server at.
-    auto executionResult =
-        RemoteRestRuntimeServer::processRequest(reqBody, /*forceLog=*/true);
-    // Amend execution information
-    executionResult["executionInfo"] = constructExecutionInfo();
-    return executionResult;
-  }
-
-private:
-  cudaq::NvcfExecutionInfo constructExecutionInfo() {
-    cudaq::NvcfExecutionInfo info;
-    const auto optionalTimePointToInt =
-        [](const auto &optionalTimePoint) -> std::size_t {
-      return optionalTimePoint.has_value()
-                 ? std::chrono::duration_cast<std::chrono::milliseconds>(
-                       optionalTimePoint.value().time_since_epoch())
-                       .count()
-                 : 0;
-    };
-    info.requestStart = optionalTimePointToInt(requestStart);
-    info.simulationStart = optionalTimePointToInt(simulationStart);
-    info.simulationEnd = optionalTimePointToInt(simulationEnd);
-    const auto deviceProps = cudaq::getCudaProperties();
-    if (deviceProps.has_value())
-      info.deviceProps = deviceProps.value();
-    return info;
-  }
-};
 } // namespace
 
 CUDAQ_REGISTER_TYPE(cudaq::RemoteRuntimeServer, RemoteRestRuntimeServer, rest)
-CUDAQ_REGISTER_TYPE(cudaq::RemoteRuntimeServer, NvcfRuntimeServer, nvcf)

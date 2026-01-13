@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -14,11 +14,10 @@
 #ifndef CUDAQ_BACKEND_STIM
 CUDAQ_TEST(AsyncTester, checkObserveAsync) {
 
-  using namespace cudaq::spin;
-
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
-  h.dump();
+  cudaq::spin_op h =
+      5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+      2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+      .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
 
   auto params = cudaq::linspace(-M_PI, M_PI, 20);
 
@@ -107,7 +106,57 @@ CUDAQ_TEST(AsyncTester, checkGetStateAsync) {
     EXPECT_NEAR(cc1State.overlap(expectedState).real(), 1.0, 1e-3);
     EXPECT_NEAR(cc2State.overlap(expectedState).real(), 1.0, 1e-3);
     EXPECT_NEAR(cc3State.overlap(expectedState).real(), 1.0, 1e-3);
+  } else {
+    std::vector<std::complex<double>> expectedVec(1 << 5, 0.0);
+    expectedVec[0] = M_SQRT1_2;
+    expectedVec[expectedVec.size() - 1] = M_SQRT1_2;
+
+    auto expectedState = cudaq::state::from_data(expectedVec);
+
+    EXPECT_NEAR(cc0State.overlap(expectedState).real(), 1.0, 1e-3);
+    EXPECT_NEAR(cc1State.overlap(expectedState).real(), 1.0, 1e-3);
+    EXPECT_NEAR(cc2State.overlap(expectedState).real(), 1.0, 1e-3);
+    EXPECT_NEAR(cc3State.overlap(expectedState).real(), 1.0, 1e-3);
   }
 }
 #endif
 #endif
+
+CUDAQ_TEST(AsyncTester, checkExplicitMeasurements) {
+  auto explicit_kernel = [](int n_qubits, int n_rounds) __qpu__ {
+    cudaq::qvector q(n_qubits);
+    for (int round = 0; round < n_rounds; round++) {
+      h(q[0]);
+      for (int i = 1; i < n_qubits; i++)
+        x<cudaq::ctrl>(q[i - 1], q[i]);
+      mz(q);
+      for (int i = 0; i < n_qubits; i++)
+        reset(q[i]);
+    }
+  };
+  int n_qubits = 4;
+  int n_rounds = 10;
+  std::size_t num_shots = 50;
+  cudaq::sample_options options{.shots = num_shots,
+                                .explicit_measurements = true};
+  auto results =
+      cudaq::sample_async(options, 0, explicit_kernel, n_qubits, n_rounds);
+  auto counts = results.get();
+  counts.dump();
+  // With many shots of multiple rounds, we need to see different shot
+  // measurements.
+  EXPECT_GT(counts.to_map().size(), 1);
+  // Check some lengths
+  auto seq = counts.sequential_data();
+  EXPECT_EQ(seq.size(), num_shots);
+  EXPECT_EQ(seq[0].size(), n_qubits * n_rounds);
+  // Check that all rounds are in the bell state (all 0's or all 1's)
+  for (auto &[k, v] : counts.to_map()) {
+    for (int r = 0; r < n_rounds; r++) {
+      std::string oneRound(k.begin() + r * n_qubits,
+                           k.begin() + (r + 1) * n_qubits);
+      EXPECT_TRUE(oneRound == std::string(n_qubits, '0') ||
+                  oneRound == std::string(n_qubits, '1'));
+    }
+  }
+}

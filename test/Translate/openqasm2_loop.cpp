@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -13,8 +13,8 @@
 #include <cudaq.h>
 #include <fstream>
 
-struct adonis_kernel {
-  // Adonis QPU.
+struct crystal_5_kernel {
+  // Crystal_5 QPU.
   //       QB1
   //        |
   // QB2 - QB3 - QB4
@@ -34,7 +34,7 @@ struct adonis_kernel {
 };
 
 int main() {
-  auto counts = cudaq::sample(adonis_kernel{});
+  auto counts = cudaq::sample(crystal_5_kernel{});
   counts.dump();
 }
 
@@ -43,7 +43,7 @@ int main() {
 
 // CHECK:   include "qelib1.inc";
 
-// CHECK:   gate ZN13adonis_kernelclEv(param0)  {
+// CHECK:   gate ZN16crystal_5_kernelclEv(param0)  {
 // CHECK:   }
 
 // CHECK:   qreg var0[5];

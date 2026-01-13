@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -44,6 +44,8 @@ static constexpr const char deviceCodeHolderAdd[] =
 
 static constexpr const char registerLinkableKernel[] =
     "__cudaq_registerLinkableKernel";
+static constexpr const char registerRunnableKernel[] =
+    "__cudaq_registerRunnableKernel";
 static constexpr const char getLinkableKernelKey[] =
     "__cudaq_getLinkableKernelKey";
 static constexpr const char getLinkableKernelName[] =
@@ -57,6 +59,8 @@ static constexpr const char CudaqRegisterArgsCreator[] =
     "cudaqRegisterArgsCreator";
 static constexpr const char CudaqRegisterKernelName[] =
     "cudaqRegisterKernelName";
+static constexpr const char CudaqRegisterCallbackName[] =
+    "cudaqRegisterCallbackName";
 
 /// Prefix for an analog kernel entry functions.
 static constexpr const char cudaqAHKPrefixName[] =
@@ -72,5 +76,17 @@ static constexpr const char getPauliWordData[] =
     "_ZNK5cudaq10pauli_word11_nvqpp_dataEv";
 static constexpr const char bindingGetStringData[] = "__nvqpp_getStringData";
 static constexpr const char bindingGetStringSize[] = "__nvqpp_getStringSize";
+static constexpr const char bindingInitializeString[] =
+    "__nvqpp_initializeStringFromSpan";
+static constexpr const char bindingDeconstructString[] =
+    "__nvqpp_deconstructString";
+static constexpr const char enableCudaqRun[] = "quake.cudaq_run";
 
+// Runtime layer of a `device_call` application.
+static constexpr const char callDeviceCallback[] =
+    "__nvqpp__device_callback_run";
+static constexpr const char extractDevPtr[] =
+    "__nvqpp__device_extract_device_ptr";
+// Garbage collection for arrays created during kernel execution.
+static constexpr const char cleanupArrays[] = "__nvqpp_cleanup_arrays";
 } // namespace cudaq::runtime

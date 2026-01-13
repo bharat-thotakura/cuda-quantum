@@ -1,5 +1,5 @@
 /********************************************************** -*- tablegen -*- ***
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -17,14 +17,16 @@ include "cudaq/Optimizer/Dialect/CC/CCInterfaces.td"
 include "cudaq/Optimizer/Dialect/CC/CCTypes.td"
 include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.td"
 
-def AnyPointerType : Type<CPred<"$_self.isa<mlir::LLVM::LLVMPointerType,"
-                          "cudaq::cc::PointerType>()">, "any pointer type">;
+def AnyPointerType : Type<CPred<"isa<mlir::LLVM::LLVMPointerType,"
+                          "cudaq::cc::PointerType>($_self)">,
+                          "any pointer type">;
 
-def AnyCallableType : Type<CPred<"$_self.isa<cudaq::cc::CallableType, "
-                          "mlir::FunctionType>()">, "any callable type">;
+def AnyCallableType : Type<CPred<"isa<cudaq::cc::CallableType, "
+                          "mlir::FunctionType>($_self)">, "any callable type">;
 
-def AnyAggregateType : Type<CPred<"$_self.isa<cudaq::cc::StructType, "
-                            "cudaq::cc::ArrayType>()">, "any aggregate type">;
+def AnyAggregateType : Type<CPred<"isa<cudaq::cc::StructType, "
+                            "cudaq::cc::ArrayType, mlir::ComplexType>($_self)">,
+                            "any aggregate type">;
 
 //===----------------------------------------------------------------------===//
 // Base operation definition.
@@ -388,11 +390,18 @@ def cc_IfOp : CCOp<"if",
       "llvm::function_ref<void(mlir::OpBuilder &, mlir::Location, "
                               "mlir::Region &)>":$thenBuilder,
       CArg<"llvm::function_ref<void(mlir::OpBuilder &, mlir::Location, "
-           "mlir::Region &)>", "nullptr">:$elseBuilder)>
+           "mlir::Region &)>", "nullptr">:$elseBuilder)>,
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::Value":$cond,
+      "mlir::ValueRange":$linearVals,
+      "llvm::function_ref<void(mlir::OpBuilder &, mlir::Location, "
+                              "mlir::Region &)>":$thenBuilder,
+      CArg<"llvm::function_ref<void(mlir::OpBuilder &, mlir::Location, "
+           "mlir::Region &)>", "nullptr">:$elseBuilder)>,
   ];
 
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 
   let extraClassDeclaration = [{
     using RegionBuilderFn = llvm::function_ref<void(mlir::OpBuilder &,
@@ -824,7 +833,7 @@ def cc_AllocaOp : CCOp<"alloca", [
 def cc_LoadOp : CCOp<"load",
     [TypesMatchWith<"result type matches element type of pointer value",
         "ptrvalue", "result",
-        "$_self.cast<cudaq::cc::PointerType>().getElementType()">]> {
+        "cast<cudaq::cc::PointerType>($_self).getElementType()">]> {
   let summary = "Load a value from a pointer into a virtual register.";
   let description = [{
     A LoadOp is used to load a value from a memory location, specified by a
@@ -849,7 +858,7 @@ def cc_LoadOp : CCOp<"load",
 def cc_StoreOp : CCOp<"store",
     [TypesMatchWith<"type of value matches element type of pointer",
         "ptrvalue", "value",
-        "$_self.cast<cudaq::cc::PointerType>().getElementType()">]> {
+        "cast<cudaq::cc::PointerType>($_self).getElementType()">]> {
   let summary = "Store a virtual register value to a memory location.";
   let description = [{
     A StoreOp is used to store the value from a virtual register to a memory
@@ -1008,7 +1017,7 @@ def cc_InsertValueOp : CCOp<"insert_value", [Pure]> {
     Example:
 
     ```mlir
-      %s = cc.insert_value %i16, %r[1, 0] :
+      %s = cc.insert_value %r[1, 0], %i16 :
            (!cc.struct<{i32, !cc.struct<{i16, f32}>}>, i16) ->
            !cc.struct<{i32, !cc.struct<{i16, f32}>}>
     ```
@@ -1022,9 +1031,11 @@ def cc_InsertValueOp : CCOp<"insert_value", [Pure]> {
   let results = (outs AnyAggregateType);
 
   let assemblyFormat = [{
-    $value `,` $container `` $position `:` functional-type(operands, results)
+    $container `` $position `,` $value `:` functional-type(operands, results)
       attr-dict
   }];
+
+  let hasVerifier = 1;
 
   let builders = [
     OpBuilder<(ins "mlir::Type":$resultType, "mlir::Value":$aggregate,
@@ -1033,6 +1044,10 @@ def cc_InsertValueOp : CCOp<"insert_value", [Pure]> {
                    mlir::ArrayRef<std::int64_t>{index});
     }]>
   ];
+
+  let extraClassDeclaration = [{
+    std::size_t getNumIndices() { return getPosition().size(); }
+  }];
 }
 
 def cc_ComputePtrOp : CCOp<"compute_ptr", [Pure]> {
@@ -1085,6 +1100,8 @@ def cc_ComputePtrOp : CCOp<"compute_ptr", [Pure]> {
     bool llvmNormalForm();
 
     std::optional<std::int32_t> getConstantIndex(std::size_t arg);
+
+    std::size_t getNumIndices() { return getRawConstantIndices().size(); }
   }];
 }
 
@@ -1159,17 +1176,201 @@ def cc_ConstantArrayOp : CCOp<"const_array", [Pure]> {
       %arrCon = cc.const_array [1.0, 2.0] : !cc.array<f64 x 2>
     ```
   }];
-  let arguments = (ins
-    ArrayAttr:$constantValues
-  );
+  let arguments = (ins ArrayAttr:$constantValues);
   let results = (outs cc_ArrayType:$arrayType);
   let assemblyFormat = [{
     $constantValues `:` qualified(type($arrayType)) attr-dict
   }];
+
+  let extraClassDeclaration = [{
+    // The total number of array dimensions.
+    std::size_t arrayDimension() {
+      std::size_t depth = 0;
+      mlir::Type ty = getType();
+      while (auto arrTy = llvm::dyn_cast<cudaq::cc::ArrayType>(ty)) {
+        ty = arrTy.getElementType();
+        ++depth;
+      }
+      return depth;
+    }
+  }];
+}
+
+def cc_CreateStringLiteralOp : CCOp<"string_literal", [Pure]> {
+  let summary = "Create a constant string literal.";
+  let description = [{
+    This operation creates a ASCIIZ string literal value. It's argument is a
+    constant MLIR String Attribute. The literal will have a null character
+    appended automatically.
+
+    ```mlir
+      %0 = cc.string_literal "Quantum Computing" : !cc.ptr<!cc.array<i8 x 18>>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$stringLiteral);
+  let results = (outs cc_PointerType:$result);
+  let assemblyFormat = [{
+     $stringLiteral `:` qualified(type(results)) attr-dict
+  }];
 }
 
 //===----------------------------------------------------------------------===//
-// Cast operation.
+// Span/Stdvec operations.
+//===----------------------------------------------------------------------===//
+
+def cc_ReifySpanOp : CCOp<"reify_span", [Pure]> {
+  let summary = "Convert a constant array value to a tree of spans.";
+  let description = [{
+    A ReifySpanOp is a macro op that can be used to convert a first-class
+    constant array value, `cc.const_array`, atomically into a tree of spans
+    as an object in memory.
+
+    The following example shows how one recovers the address of the string
+    object "YI\0" from a const_array of strings, `%2`. It also shows how to
+    reify that array to a span of spans of characters, `%3`.
+
+    ```mlir
+      %1 = cc.const_array [ "XZ", "YI" ] : !cc.array<!cc.charspan x 2>
+      %2 = cc.extract_value %1[1] : (!cc.array<!cc.charspan>) -> !cc.charspan
+      %3 = cc.reify_span %1 : (!cc.array<!cc.charspan x 2>) ->
+                               !cc.stdvec<!cc.charspan>
+    ```
+
+    Expanding the reify_span op will generate the following code
+    ```mlir
+      %1 = cc.alloca !cc.array<!cc.charspan x 2>
+      %2 = cc.string_literal "XZ" : !cc.ptr<!cc.array<i8 x 3>>
+      %4 = cc.stdvec_init %2 : (!cc.ptr<!cc.array<i8 x 3>>) -> !cc.charspan
+      %5 = cc.cast %1 : (!cc.ptr<!cc.array<!cc.charspan x 2>>) ->
+                         !cc.ptr<!cc.charspan>
+      cc.store %4, %5 : !cc.ptr<!cc.charspan>
+      %6 = cc.string_literal "YI" : !cc.ptr<!cc.array<i8 x 3>>
+      %8 = cc.stdvec_init %6 : (!cc.ptr<!cc.array<i8 x 3>>) -> !cc.charspan
+      %9 = cc.compute_ptr %1[1] : (!cc.ptr<!cc.array<!cc.charspan x 2>>) ->
+                                   !cc.ptr<!cc.charspan>
+      cc.store %8, %9 : !cc.ptr<!cc.charspan>
+    ```
+  }];
+
+  let arguments = (ins cc_ArrayType:$elements);
+  let results = (outs cc_StdVectorType:$spanType);
+  let assemblyFormat = [{
+    $elements `:` functional-type(operands, results) attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    // The total number span dimensions. The total is the number of outer
+    // std::vector<T> classes plus one if the inner class is a std::string.
+    std::size_t spanDimension() {
+      std::size_t depth = 0;
+      mlir::Type ty = getType();
+      while (auto spanTy = llvm::dyn_cast<cudaq::cc::SpanLikeType>(ty)) {
+        ty = spanTy.getElementType();
+        ++depth;
+      }
+      return depth;
+    }
+
+    // The number of std::vector<T> dimensions.
+    std::size_t vectorDimension() {
+      std::size_t depth = 0;
+      mlir::Type ty = getType();
+      while (auto vecTy = llvm::dyn_cast<cudaq::cc::StdvecType>(ty)) {
+        ty = vecTy.getElementType();
+        ++depth;
+      }
+      return depth;
+    }
+  }];
+}
+
+def cc_StdvecInitOp : CCOp<"stdvec_init", [Pure]> {
+  let summary = "Initialize a stdvec object from a pointer and length.";
+  let description = [{
+    A StdvecInitOp can be used to create a "high-level" `std::vector` object in
+    cc. The construction is similar to the `std::vector` initializer list
+    constructor. It takes two arguments: a pointer to a memory buffer and the
+    length of the buffer in terms of the number of elements.
+
+    Note this op has value semantics and does not touch memory. It is used to
+    create an abstract aggregate value. No data is moved or copied.
+
+    Example:
+
+    ```mlir
+      %buff = ... : !cc.ptr<f64>
+      %len = ... : i64
+      %vec1 = cc.stdvec_init %buff, %len : (!cc.ptr<f64>, i64) ->
+                                            !cc.stdvec<f64>
+      func.call @kernel(%vec1) ...
+
+      %arr = ... : !cc.ptr<!cc.array<i64 x 12>>
+      %vec2 = cc.stdvec_init %arr : (!cc.ptr<!cc.array<i64 x 12>>) ->
+                                     !cc.stdvec<i64>  // span length is 12
+    ```
+  }];
+
+  let arguments = (ins
+    AnyPointerType:$buffer,
+    Optional<AnyInteger>:$length
+  );
+  let results = (outs SpanningType:$stdvec);
+
+  let hasVerifier = 1;
+  let hasCanonicalizer = 1;
+
+  let assemblyFormat = [{
+    $buffer ( `,` $length^ )? `:` functional-type(operands, results) attr-dict
+  }];
+}
+
+def cc_StdvecDataOp : CCOp<"stdvec_data", [Pure]> {
+  let summary = "Retrieve the data pointer from a stdvec object.";
+  let description = [{
+    A StdvecDataOp can be used to retreive the data pointer from a stdvec
+    object. (See StdvecInitOp.) This operation is analogous to a call to
+    `std::vector<T>::data()`.
+
+    Note that this operation has value semantics. It does not touch memory as
+    the data pointer is part of the aggregate value and nothing is dereferenced.
+  }];
+
+  let arguments = (ins SpanningType:$stdvec);
+  let results = (outs AnyPointerType:$data);
+
+  let hasCanonicalizer = 1;
+
+  let assemblyFormat = [{
+    $stdvec `:` functional-type(operands, results) attr-dict
+  }];
+}
+
+def cc_StdvecSizeOp : CCOp<"stdvec_size", [Pure]> {
+  let summary = "Retrieve the size from a stdvec object.";
+  let description = [{
+    A StdvecSizeOp can be used to retreive the size from a stdvec object.
+    This is analogous to a call to `std::vector<T>::size()`.
+
+    Note that this operation is pure and has value semantics. It does not
+    modify memory as the size is part of a stdvec's aggregate value and nothing
+    is dereferenced.
+  }];
+
+  let arguments = (ins SpanningType:$stdvec);
+  let results = (outs AnyInteger:$size);
+
+  let hasCanonicalizer = 1;
+
+  let assemblyFormat = [{
+    $stdvec `:` functional-type(operands, results) attr-dict
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Type conversions.
 //===----------------------------------------------------------------------===//
 
 def cc_CastOp : CCOp<"cast", [Pure]> {
@@ -1228,88 +1429,6 @@ def cc_CastOp : CCOp<"cast", [Pure]> {
   ];
 }
 
-//===----------------------------------------------------------------------===//
-// Stdvec operations.
-//===----------------------------------------------------------------------===//
-
-def cc_StdvecInitOp : CCOp<"stdvec_init", [Pure]> {
-  let summary = "Initialize a stdvec object from a pointer and length.";
-  let description = [{
-    A StdvecInitOp can be used to create a "high-level" `std::vector` object in
-    cc. The construction is similar to the `std::vector` initializer list
-    constructor. It takes two arguments: a pointer to a memory buffer and the
-    length of the buffer in terms of the number of elements.
-
-    Note this op has value semantics and does not touch memory. It is used to
-    create an abstract aggregate value. No data is moved or copied.
-
-    Example:
-
-    ```mlir
-    %buff = ... : !cc.ptr<f64>
-    %len = ... : i64
-    %svec = cc.stdvec_init %buff, %len : (!cc.ptr<f64>, i64) -> !cc.stdvec<f64>
-    func.call @kernel(%svec) ...
-    ```
-  }];
-
-  let arguments = (ins
-    AnyPointerType:$buffer,
-    AnyInteger:$length
-  );
-  let results = (outs SpanningType:$stdvec);
-
-  let assemblyFormat = [{
-    $buffer `,` $length `:` functional-type(operands, results) attr-dict
-  }];
-}
-
-def cc_StdvecDataOp : CCOp<"stdvec_data", [Pure]> {
-  let summary = "Retrieve the data pointer from a stdvec object.";
-  let description = [{
-    A StdvecDataOp can be used to retreive the data pointer from a stdvec
-    object. (See StdvecInitOp.) This operation is analogous to a call to
-    `std::vector<T>::data()`.
-
-    Note that this operation has value semantics. It does not touch memory as
-    the data pointer is part of the aggregate value and nothing is dereferenced.
-  }];
-
-  let arguments = (ins SpanningType:$stdvec);
-  let results = (outs AnyPointerType:$data);
-
-  let hasCanonicalizer = 1;
-
-  let assemblyFormat = [{
-    $stdvec `:` functional-type(operands, results) attr-dict
-  }];
-}
-
-def cc_StdvecSizeOp : CCOp<"stdvec_size", [Pure]> {
-  let summary = "Retrieve the size from a stdvec object.";
-  let description = [{
-    A StdvecSizeOp can be used to retreive the size from a stdvec object.
-    This is analogous to a call to `std::vector<T>::size()`.
-
-    Note that this operation is pure and has value semantics. It does not
-    modify memory as the size is part of a stdvec's aggregate value and nothing
-    is dereferenced.
-  }];
-
-  let arguments = (ins SpanningType:$stdvec);
-  let results = (outs AnyInteger:$size);
-
-  let hasCanonicalizer = 1;
-
-  let assemblyFormat = [{
-    $stdvec `:` functional-type(operands, results) attr-dict
-  }];
-}
-
-//===----------------------------------------------------------------------===//
-// Type conversions.
-//===----------------------------------------------------------------------===//
-
 def cc_FuncToPtrOp : CCOp<"func_ptr", [Pure]> {
   let summary = "Cast a function to a pointer.";
   let description = [{
@@ -1333,7 +1452,7 @@ def cc_FuncToPtrOp : CCOp<"func_ptr", [Pure]> {
 }
 
 //===----------------------------------------------------------------------===//
-// Lambda (λ) expressions.
+// Lambda (λ) expressions and other calls.
 //===----------------------------------------------------------------------===//
 
 def cc_CreateLambdaOp : CCOp<"create_lambda",
@@ -1456,8 +1575,8 @@ def cc_CallCallableOp : CCOp<"call_callable", [CallOpInterface]> {
   }];
 }
 
-def cc_CallIndirectCallableOp : CCOp<"call_indirect_callable",
-    [CallOpInterface]> {
+def cc_CallIndirectCallableOp :
+    CCOp<"call_indirect_callable", [CallOpInterface]> {
   let summary = "Call a C++ callable, unresolved, at run-time.";
   let description = [{
     This effectively connects a call from one kernel to another kernel, which
@@ -1535,11 +1654,13 @@ def cc_InstantiateCallableOp : CCOp<"instantiate_callable", [Pure]> {
     outlined λ function in the following example.
 
     ```mlir
-      %lambda = cc.instantiate_callable @trampoline.54(%88) : (f64) -> !cc.callable<(i32) -> ()>
+      %lambda = cc.instantiate_callable @trampoline.54(%88) : (f64) ->
+          !cc.callable<(i32) -> ()>
       ...
 
       // Trampoline function
-      func.func private @trampoline.54(%arg0: !cc.callable<(i32) -> ()>, %arg1: i32) {
+      func.func private @trampoline.54(%arg0: !cc.callable<(i32) -> ()>,
+                                       %arg1: i32) {
         %0 = cc.callable_closure %arg0: !cc.callable<(i32) -> ()> -> f64
         call @lifted_lambda.54(%0, %arg1) : (f64, i32) -> ()
       }
@@ -1593,7 +1714,8 @@ def cc_CallableFuncOp : CCOp<"callable_func", [Pure]> {
     ```mlir
       %0 = ... : !cc.callable<(i32) -> i8>
       %1 = ... : i32
-      %2 = cc.callable_func %0 : (!cc.callable<(i32) -> i8>) -> ((!cc.callable<(i32) -> i8>, i32) -> i8)
+      %2 = cc.callable_func %0 : (!cc.callable<(i32) -> i8>) ->
+          ((!cc.callable<(i32) -> i8>, i32) -> i8)
       %3 = call_indirect %2(%0, %1) : (!cc.callable<(i32) -> i8>, i32) -> i8
     ```
 
@@ -1631,7 +1753,8 @@ def cc_CallableClosureOp : CCOp<"callable_closure", [Pure]> {
     ```mlir
       %0 = ... !cc.callable<(i32) -> i8>
       %1 = ... : i32
-      %2:2 = cc.callable_closure %0 : (!cc.callable<(i32) -> i8>) -> (!quake.wire, i1)
+      %2:2 = cc.callable_closure %0 : (!cc.callable<(i32) -> i8>) ->
+               (!quake.wire, i1)
       %3 = call @lifted_lambda.72(%2#0, %2#1, %1) : (!quake.wire, i1, i32) -> i8
     ```
 
@@ -1646,27 +1769,187 @@ def cc_CallableClosureOp : CCOp<"callable_closure", [Pure]> {
   }];
 }
 
-def cc_CreateStringLiteralOp : CCOp<"string_literal"> {
-  let summary = "Create a constant string literal.";
+def cc_NoInlineCallOp : CCOp<"noinline_call",
+    [CallOpInterface, SymbolUserOpInterface]> {
+  let summary = "Create a call that the inliner will not inline.";
   let description = [{
-    This operation creates a ASCIIZ string literal value. It's argument is a
-    constant MLIR String Attribute. The literal will have a null character
-    appended automatically.
+    The MLIR inliner in LLVM 16 is too smart and will inline trivial calls.
+    Moreover, there is no mechanism in this version of MLIR to stop the inliner
+    from inlining these trivial functions.
 
-    ```mlir
-      %0 = cc.string_literal "Quantum Computing" : !cc.ptr<!cc.array<i8 x 18>>
-    ```
+    The cc.noinline_call is therefore a special op that prevents the inliner
+    from doing the inlining by misreporting what function is called.
   }];
 
-  let arguments = (ins StrAttr:$stringLiteral);
-  let results = (outs cc_PointerType:$result);
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,
+    Variadic<AnyType>:$args
+  );
+  let results = (outs Variadic<AnyType>);
+
   let assemblyFormat = [{
-     $stringLiteral `:` qualified(type(results)) attr-dict
+    $callee `(` $args `)` `:` functional-type(operands, results) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    operand_range getArgOperands() {
+      return {arg_operand_begin(), arg_operand_end()};
+    }
+
+    operand_iterator arg_operand_begin() { return operand_begin(); }
+    operand_iterator arg_operand_end() { return operand_end(); }
+
+    /// DO NOT RETURN the callee of this operation. This fools the inliner into
+    /// not knowing what is actually called.
+    mlir::CallInterfaceCallable getCallableForCallee() {
+      return mlir::FlatSymbolRefAttr::get(getContext(), ".no.inline");
+    }
+
+    mlir::LogicalResult verifySymbolUses(mlir::SymbolTableCollection &);
   }];
 }
 
+def cc_DeviceCallOp : CCOp<"device_call",
+    [AttrSizedOperandSegments, CallOpInterface, SymbolUserOpInterface]> {
+  let summary = "Create a QPU callback.";
+  let description = [{
+    In a tightly coupled environment, the quantum code may callback to regular
+    classical C++ code on the control driver. This op is therefore used to
+    execute classical compute code from within a quantum kernel on the tightly
+    integrated (expanded) QPU model.
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,
+    Variadic<AnySignlessInteger>:$numBlocks,
+    Variadic<AnySignlessInteger>:$numThreadsPerBlock,
+    Optional<AnySignlessInteger>:$device,
+    Variadic<AnyType>:$args
+  );
+  let results = (outs Variadic<AnyType>);
+  let assemblyFormat = [{
+    $callee ( `<` $numBlocks^ ( `*` $numThreadsPerBlock^ )? `>` )?
+      ( `on` $device^ )? `(` $args `)`
+      `:` functional-type(operands, results) attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resTys, "mlir::StringRef":$callee,
+                   "mlir::ValueRange":$values), [{
+      return build($_builder, $_state, resTys, callee, mlir::ValueRange{},
+        mlir::ValueRange{},  mlir::Value{}, values);
+    }]>,
+    OpBuilder<(ins "mlir::TypeRange":$resTys, "mlir::StringRef":$callee,
+                   "mlir::Value":$device, "mlir::ValueRange":$values), [{
+      return build($_builder, $_state, resTys, callee, mlir::ValueRange{},
+        mlir::ValueRange{}, device, values);
+    }]>,
+    OpBuilder<(ins "mlir::TypeRange":$resTys, "mlir::StringRef":$callee,
+                   "mlir::ValueRange":$blocks, "mlir::ValueRange":$threads,
+                   "mlir::ValueRange":$values), [{
+      return build($_builder, $_state, resTys, callee, blocks, threads,
+        mlir::Value{}, values);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    operand_range getArgOperands() {
+      return {arg_operand_begin(), arg_operand_end()};
+    }
+
+    operand_iterator arg_operand_begin() { return operand_begin(); }
+    operand_iterator arg_operand_end() { return operand_end(); }
+
+    /// Return the callee of this operation.
+    mlir::CallInterfaceCallable getCallableForCallee() {
+      return getCalleeAttr();
+    }
+
+    mlir::LogicalResult verifySymbolUses(mlir::SymbolTableCollection &);
+  }];
+}
+
+
+def cc_ResolveDevicePtrOp : CCOp<"resolve_device_ptr", []> {
+  let summary =
+    "Resolve a CUDA-Q driver device_ptr handle type to a memory pointer value.";
+  let description = [{
+    In a tightly coupled environment, the quantum code may allocate data
+    on the controller or available classical devices. This data is modeled via
+    CUDA-Q Driver device_ptr instances. These instances are handles to the
+    data on a specific device. This op is used to resolve the device_ptr
+    handle to a raw memory pointer.
+  }];
+
+  let arguments = (ins PointerOf<[cc_StructType]>:$devicePtr);
+  let results = (outs cc_PointerType);
+
+  let assemblyFormat = [{
+    $devicePtr `:` functional-type(operands, results) attr-dict
+  }];
+}
+
+def cc_VarargCallOp : CCOp<"call_vararg",
+    [CallOpInterface, SymbolUserOpInterface]> {
+  let summary = "Create a call to an llvm.func with variadic arguments.";
+  let description = [{
+    This operation lets us create a call to an LLVMIR FuncOp with variadic
+    arguments without the restriction that all the arguments have to be
+    converted to LLVMIR types first. These conversions are just code bloat and
+    make the code harder to read.
+
+    The use of LLVMIR dialect for varargs functions is required as MLIR's Func
+    dialect does not support varargs calls.
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,
+    Variadic<AnyType>:$args
+  );
+  let results = (outs Variadic<AnyType>);
+
+  let assemblyFormat = [{
+    $callee `(` $args `)` `:` functional-type(operands, results) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    operand_range getArgOperands() {
+      return {arg_operand_begin(), arg_operand_end()};
+    }
+
+    operand_iterator arg_operand_begin() { return operand_begin(); }
+    operand_iterator arg_operand_end() { return operand_end(); }
+
+    /// Return the callee of this operation.
+    mlir::CallInterfaceCallable getCallableForCallee() {
+      return getCalleeAttr();
+    }
+
+    mlir::LogicalResult verifySymbolUses(mlir::SymbolTableCollection &);
+  }];
+}
+
+def cc_LogOutputOp : CCOp<"log_output"> {
+  let summary = "Auto-generate calls to log the output of a runnable kernel.";
+  let description = [{
+    This operation is an abstraction for auto-generation of the necessary code
+    in the transport layer to log output results from a runnable kernel. The
+    assumption is that the transport layer supports something analogous to a
+    set of file output functions, something like `fprintf()`.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$args);
+  let assemblyFormat = "$args `:` type(operands) attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// Argument synthesis support
+//===----------------------------------------------------------------------===//
+
 def cc_ArgumentSubstitutionOp : CCOp<"arg_subst",
-  [IsolatedFromAbove, NoRegionArguments, NoTerminator, SingleBlock]> {
+    [IsolatedFromAbove, NoRegionArguments, NoTerminator, SingleBlock]> {
   let summary = "An argument substition.";
   let description = [{
     This operation is used to define computations to produce a particular value.

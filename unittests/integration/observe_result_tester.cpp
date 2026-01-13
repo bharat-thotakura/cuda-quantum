@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -28,9 +28,10 @@ struct deuteron_n3_ansatz {
 
 CUDAQ_TEST(ObserveResult, checkSimple) {
 
-  using namespace cudaq::spin;
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
+  cudaq::spin_op h =
+      5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+      2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+      .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
 
   auto ansatz = [](double theta) __qpu__ {
     cudaq::qubit q, r;
@@ -73,16 +74,20 @@ CUDAQ_TEST(ObserveResult, checkSimple) {
   printf("Energy from observe_result with shots %lf\n", obs_res2.expectation());
   obs_res2.dump();
 
-  for (const auto &term : h) // td::size_t i = 0; i < h.num_terms(); i++)
+  for (const auto &term : h)
     if (!term.is_identity())
       printf("Fine-grain data access: %s = %lf\n", term.to_string().data(),
              obs_res2.expectation(term));
 
-  auto x0x1Counts = obs_res2.counts(x(0) * x(1));
+  auto observable = cudaq::spin_op::x(0) * cudaq::spin_op::x(1);
+  auto x0x1Counts = obs_res2.counts(observable);
   x0x1Counts.dump();
   EXPECT_TRUE(x0x1Counts.size() == 4);
 }
 
+// By default, tensornet backends only compute the overall expectation value in
+// observe, i.e., no sub-term calculations.
+#ifndef CUDAQ_BACKEND_TENSORNET
 CUDAQ_TEST(ObserveResult, checkExpValBug) {
 
   auto kernel = []() __qpu__ {
@@ -94,21 +99,67 @@ CUDAQ_TEST(ObserveResult, checkExpValBug) {
     ry(-0.4, qubits[0]);
     cz(qubits[1], qubits[2]);
   };
-  using namespace cudaq::spin;
 
-  auto hamiltonian = z(0) + z(1);
+  auto hamiltonian = cudaq::spin_op::z(0) + cudaq::spin_op::z(1);
 
   auto result = cudaq::observe(kernel, hamiltonian);
-  auto exp = result.expectation(z(0));
+  auto observable = cudaq::spin_op::z(0);
+  auto exp = result.expectation(observable);
   printf("exp %lf \n", exp);
   EXPECT_NEAR(exp, .79, 1e-1);
 
-  exp = result.expectation(z(1));
+  observable = cudaq::spin_op::z(1);
+  exp = result.expectation(observable);
   printf("exp %lf \n", exp);
   EXPECT_NEAR(exp, .62, 1e-1);
 
-  exp = result.expectation(z(0) * i(1));
-  printf("exp %lf \n", exp);
-  EXPECT_NEAR(exp, .79, 1e-1);
+  // We support retrieval of terms as long as they are equal to the
+  // terms defined in the spin op passed to observe. A term/operator
+  // that acts on two degrees is never the same as an operator that
+  // acts on one degree, even if it only acts with an identity on the
+  // second degree. While the expectation values generally should be
+  // the same in this case, the operators are not (e.g. the respective
+  // kernels/gates defined by the two operators is not the same since
+  // it acts on a different number of qubits). This is in particular
+  // also relevant for noise modeling.
 }
+#endif
+
+CUDAQ_TEST(ObserveResult, checkObserveWithIdentity) {
+
+  auto kernel = []() __qpu__ {
+    cudaq::qvector qubits(5);
+    cudaq::exp_pauli(1.0, qubits, "XXIIX");
+  };
+
+  const std::string pauliWord = "ZZIIZ";
+  const std::size_t numQubits = pauliWord.size();
+  auto pauliOp = cudaq::spin_op::from_word(pauliWord);
+  // The canonicalized degree list is less than the number of qubits
+  EXPECT_LT(cudaq::spin_op::canonicalize(pauliOp).degrees().size(), numQubits);
+  auto expVal = cudaq::observe(kernel, pauliOp);
+  std::cout << "<" << pauliWord << "> = " << expVal.expectation() << "\n";
+  EXPECT_NEAR(expVal.expectation(), -0.416147, 1e-6);
+}
+
+#ifdef CUDAQ_BACKEND_TENSORNET
+CUDAQ_TEST(ObserveResult, checkObserveWithIdentityLarge) {
+
+  auto kernel = []() __qpu__ {
+    cudaq::qvector qubits(50);
+    cudaq::exp_pauli(1.0, qubits,
+                     "XXIIXXXIIXXXIIXXXIIXXXIIXXXIIXXXIIXXXIIXXXIIXXXIXX");
+  };
+
+  const std::string pauliWord =
+      "ZZIIZZZIIZZZIIZZZIIZZZIIZZZIIZZZIIZZZIIZZZIIZZZIZZ";
+  const std::size_t numQubits = pauliWord.size();
+  auto pauliOp = cudaq::spin_op::from_word(pauliWord);
+  // The canonicalized degree list is less than the number of qubits
+  EXPECT_LT(cudaq::spin_op::canonicalize(pauliOp).degrees().size(), numQubits);
+  auto expVal = cudaq::observe(kernel, pauliOp);
+  std::cout << "<" << pauliWord << "> = " << expVal.expectation() << "\n";
+  EXPECT_NEAR(expVal.expectation(), -0.416147, 1e-3);
+}
+#endif
 #endif

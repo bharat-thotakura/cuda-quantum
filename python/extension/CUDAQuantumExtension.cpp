@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -16,32 +16,40 @@
 #include "runtime/common/py_ExecutionContext.h"
 #include "runtime/common/py_NoiseModel.h"
 #include "runtime/common/py_ObserveResult.h"
+#include "runtime/common/py_Resources.h"
 #include "runtime/common/py_SampleResult.h"
 #include "runtime/cudaq/algorithms/py_draw.h"
 #include "runtime/cudaq/algorithms/py_evolve.h"
 #include "runtime/cudaq/algorithms/py_observe_async.h"
 #include "runtime/cudaq/algorithms/py_optimizer.h"
+#include "runtime/cudaq/algorithms/py_resource_count.h"
+#include "runtime/cudaq/algorithms/py_run.h"
 #include "runtime/cudaq/algorithms/py_sample_async.h"
 #include "runtime/cudaq/algorithms/py_state.h"
 #include "runtime/cudaq/algorithms/py_translate.h"
+#include "runtime/cudaq/algorithms/py_unitary.h"
+#include "runtime/cudaq/algorithms/py_utils.h"
 #include "runtime/cudaq/algorithms/py_vqe.h"
+#include "runtime/cudaq/operators/py_boson_op.h"
+#include "runtime/cudaq/operators/py_fermion_op.h"
+#include "runtime/cudaq/operators/py_handlers.h"
+#include "runtime/cudaq/operators/py_matrix.h"
+#include "runtime/cudaq/operators/py_matrix_op.h"
+#include "runtime/cudaq/operators/py_scalar_op.h"
+#include "runtime/cudaq/operators/py_spin_op.h"
+#include "runtime/cudaq/operators/py_super_op.h"
 #include "runtime/cudaq/platform/py_alt_launch_kernel.h"
 #include "runtime/cudaq/qis/py_execution_manager.h"
 #include "runtime/cudaq/qis/py_qubit_qis.h"
-#include "runtime/cudaq/spin/py_matrix.h"
-#include "runtime/cudaq/spin/py_spin_op.h"
 #include "runtime/cudaq/target/py_runtime_target.h"
 #include "runtime/cudaq/target/py_testing_utils.h"
+#include "runtime/interop/PythonCppInterop.h"
 #include "runtime/mlir/py_register_dialects.h"
 #include "utils/LinkedLibraryHolder.h"
 #include "utils/OpaqueArguments.h"
-
 #include "mlir/Bindings/Python/PybindAdaptors.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
-
-#include "runtime/interop/PythonCppInterop.h"
-
 #include <pybind11/complex.h>
 #include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
@@ -67,7 +75,7 @@ PYBIND11_MODULE(_quakeDialects, m) {
   cudaqRuntime.def(
       "initialize_cudaq",
       [&](py::kwargs kwargs) {
-        cudaq::info("Calling initialize_cudaq.");
+        CUDAQ_INFO("Calling initialize_cudaq.");
         if (!kwargs)
           return;
 
@@ -85,7 +93,7 @@ PYBIND11_MODULE(_quakeDialects, m) {
         for (auto &[keyPy, valuePy] : kwargs) {
           std::string key = py::str(keyPy);
           std::string value = py::str(valuePy);
-          cudaq::info("Processing Python Arg: {} - {}", key, value);
+          CUDAQ_INFO("Processing Python Arg: {} - {}", key, value);
           if (key == "target")
             holder->setTarget(value, extraConfig);
         }
@@ -94,23 +102,37 @@ PYBIND11_MODULE(_quakeDialects, m) {
 
   cudaq::bindRuntimeTarget(cudaqRuntime, *holder.get());
   cudaq::bindMeasureCounts(cudaqRuntime);
+  cudaq::bindResources(cudaqRuntime);
   cudaq::bindObserveResult(cudaqRuntime);
   cudaq::bindComplexMatrix(cudaqRuntime);
+  cudaq::bindScalarWrapper(cudaqRuntime);
   cudaq::bindSpinWrapper(cudaqRuntime);
+  cudaq::bindFermionWrapper(cudaqRuntime);
+  cudaq::bindBosonWrapper(cudaqRuntime);
+  cudaq::bindOperatorsWrapper(cudaqRuntime);
+  cudaq::bindHandlersWrapper(cudaqRuntime);
+  cudaq::bindSuperOperatorWrapper(cudaqRuntime);
   cudaq::bindQIS(cudaqRuntime);
   cudaq::bindOptimizerWrapper(cudaqRuntime);
   cudaq::bindNoise(cudaqRuntime);
   cudaq::bindExecutionContext(cudaqRuntime);
   cudaq::bindExecutionManager(cudaqRuntime);
   cudaq::bindPyState(cudaqRuntime, *holder.get());
+  cudaq::bindPyDataClassRegistry(cudaqRuntime);
   cudaq::bindPyEvolve(cudaqRuntime);
   cudaq::bindEvolveResult(cudaqRuntime);
   cudaq::bindPyDraw(cudaqRuntime);
+  cudaq::bindPyUnitary(cudaqRuntime);
+  cudaq::bindPyRun(cudaqRuntime);
+  cudaq::bindPyRunAsync(cudaqRuntime);
   cudaq::bindPyTranslate(cudaqRuntime);
+  cudaq::bindCountResources(cudaqRuntime);
   cudaq::bindSampleAsync(cudaqRuntime);
   cudaq::bindObserveAsync(cudaqRuntime);
   cudaq::bindVQE(cudaqRuntime);
-  cudaq::bindAltLaunchKernel(cudaqRuntime);
+  cudaq::bindAltLaunchKernel(cudaqRuntime, [holderPtr = holder.get()]() {
+    return cudaq::python::getTransportLayer(holderPtr);
+  });
   cudaq::bindTestUtils(cudaqRuntime, *holder.get());
   cudaq::bindCustomOpRegistry(cudaqRuntime);
 
@@ -169,6 +191,14 @@ PYBIND11_MODULE(_quakeDialects, m) {
       "Returns true if MPI has already been initialized.");
   mpiSubmodule.def(
       "finalize", []() { cudaq::mpi::finalize(); }, "Finalize MPI.");
+  mpiSubmodule.def(
+      "comm_dup",
+      []() {
+        const auto [commPtr, commSize] = cudaq::mpi::comm_dup();
+        return std::make_pair(reinterpret_cast<intptr_t>(commPtr), commSize);
+      },
+      "Duplicates the communicator. Return the new communicator address (as an "
+      "integer) and its size in bytes");
 
   auto orcaSubmodule = cudaqRuntime.def_submodule("orca");
   orcaSubmodule.def(
@@ -228,7 +258,7 @@ PYBIND11_MODULE(_quakeDialects, m) {
           targetInfo.emplace_back(t[0], t[1]);
         }
         cudaq::getExecutionManager()->apply(name, params, {}, targetInfo, false,
-                                            cudaq::spin_op());
+                                            cudaq::spin_op::identity());
       },
       "Apply the input photonics operation on the target qudits.",
       py::arg("name"), py::arg("params"), py::arg("targets"));
@@ -279,13 +309,11 @@ PYBIND11_MODULE(_quakeDialects, m) {
         // the func op.
         auto [kName, code] = ret;
         auto ctx = unwrap(mod).getContext();
-        auto moduleB = mlir::parseSourceString<ModuleOp>(code, ctx);
+        auto moduleB = mlir::parseSourceString<mlir::ModuleOp>(code, ctx);
         auto moduleA = unwrap(mod);
-        moduleB->walk([&moduleA](func::FuncOp op) {
-          if (!moduleA.lookupSymbol<func::FuncOp>(op.getName()))
-            moduleA.push_back(op.clone());
-          return WalkResult::advance();
-        });
+
+        // Merge symbols from moduleB into moduleA.
+        cudaq::opt::factory::mergeModules(moduleA, *moduleB);
         return kName;
       },
       "Given a python module name like `mod1.mod2.func`, see if there is a "

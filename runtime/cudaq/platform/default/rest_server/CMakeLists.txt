@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -90,6 +90,7 @@ target_link_libraries(rest-remote-platform-server
   PRIVATE
     rest_server_impl
     cudaq 
+    cudaq-operator
     cudaq-em-default 
     cudaq-mlir-runtime
     cudaq-platform-default

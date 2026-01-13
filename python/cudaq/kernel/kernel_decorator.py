@@ -1,26 +1,27 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-import ast, sys, traceback
+import ast
 import importlib
 import inspect
 import json
-from typing import Callable
-from ..mlir.ir import *
-from ..mlir.passmanager import *
-from ..mlir.dialects import quake, cc, func
-from .ast_bridge import compile_to_mlir, PyASTBridge
-from .utils import mlirTypeFromPyType, nvqppPrefix, mlirTypeToPyType, globalAstRegistry, emitFatalError, emitErrorIfInvalidPauli, globalRegisteredTypes
-from .analysis import MidCircuitMeasurementAnalyzer, HasReturnNodeVisitor
-from ..mlir._mlir_libs._quakeDialects import cudaq_runtime
-from .captured_data import CapturedDataStorage
-from ..handlers import PhotonicsHandler
-
 import numpy as np
+
+from cudaq.handlers import get_target_handler
+from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
+from cudaq.mlir.dialects import cc, func
+from cudaq.mlir.ir import (ComplexType, F32Type, F64Type, IntegerType,
+                           SymbolTable, UnitAttr)
+from .analysis import HasReturnNodeVisitor
+from .ast_bridge import compile_to_mlir, PyASTBridge
+from .captured_data import CapturedDataStorage
+from .utils import (emitFatalError, emitErrorIfInvalidPauli, globalAstRegistry,
+                    globalKernelDecorators, globalRegisteredTypes,
+                    mlirTypeFromPyType, mlirTypeToPyType, nvqppPrefix)
 
 # This file implements the decorator mechanism needed to
 # JIT compile CUDA-Q kernels. It exposes the cudaq.kernel()
@@ -64,10 +65,11 @@ class PyKernelDecorator(object):
             self.signature = signature
         else:
             self.kernelFunction = function
-            self.name = kernelName if kernelName != None else self.kernelFunction.__name__
-            self.location = (inspect.getfile(self.kernelFunction),
-                             inspect.getsourcelines(self.kernelFunction)[1]
-                            ) if self.kernelFunction is not None else ('', 0)
+            self.name = (kernelName if kernelName != None else
+                         self.kernelFunction.__name__)
+            self.location = ((inspect.getfile(self.kernelFunction),
+                              inspect.getsourcelines(self.kernelFunction)[1])
+                             if self.kernelFunction is not None else ('', 0))
 
         self.capturedDataStorage = None
 
@@ -92,8 +94,8 @@ class PyKernelDecorator(object):
         # Register any external class types that may be used
         # in the kernel definition
         for name, var in self.globalScopedVars.items():
-            if isinstance(var, type):
-                globalRegisteredTypes[name] = (var, var.__annotations__)
+            if isinstance(var, type) and hasattr(var, '__annotations__'):
+                globalRegisteredTypes.registerClass(name, var)
 
         # Once the kernel is compiled to MLIR, we
         # want to know what capture variables, if any, were
@@ -159,21 +161,22 @@ class PyKernelDecorator(object):
                 'CUDA-Q kernel has return statement but no return type annotation.'
             )
 
-        # Run analyzers and attach metadata (only have 1 right now)
-        analyzer = MidCircuitMeasurementAnalyzer()
-        analyzer.visit(self.astModule)
-        self.metadata = {'conditionalOnMeasure': analyzer.hasMidCircuitMeasures}
-
         # Store the AST for this kernel, it is needed for
         # building up call graphs. We also must retain
         # the source code location for error diagnostics
         globalAstRegistry[self.name] = (self.astModule, self.location)
+        # Add this decorator to the global set
+        globalKernelDecorators.add(self)
 
     def compile(self):
         """
         Compile the Python function AST to MLIR. This is a no-op 
         if the kernel is already compiled. 
         """
+
+        handler = get_target_handler()
+        if handler.skip_compilation() is True:
+            return
 
         # Before we can execute, we need to make sure
         # variables from the parent frame that we captured
@@ -204,12 +207,16 @@ class PyKernelDecorator(object):
                 break
             s = s.f_back
 
-        if self.module != None:
+        if self.module is not None:
             return
 
+        # Cleanup up the captured data if the module needs recompilation.
+        self.capturedDataStorage = self.createStorage()
+
+        # Caches the module and stores captured data into
+        # `self.capturedDataStorage`.
         self.module, self.argTypes, extraMetadata = compile_to_mlir(
             self.astModule,
-            self.metadata,
             self.capturedDataStorage,
             verbose=self.verbose,
             returnType=self.returnType,
@@ -242,10 +249,10 @@ class PyKernelDecorator(object):
 
     def synthesize_callable_arguments(self, funcNames):
         """
-        Given this Kernel has callable block arguments, synthesize away these 
-        callable arguments with the in-module FuncOps with given names. The 
-        name at index 0 in the list corresponds to the first callable block 
-        argument, index 1 to the second callable block argument, etc. 
+        Given this Kernel has callable block arguments, synthesize away these
+        callable arguments with the in-module FuncOps with given names. The name
+        at index 0 in the list corresponds to the first callable block argument,
+        index 1 to the second callable block argument, etc.
         """
         self.compile()
         cudaq_runtime.synthPyCallable(self.module, funcNames)
@@ -256,8 +263,8 @@ class PyKernelDecorator(object):
 
     def extract_c_function_pointer(self, name=None):
         """
-        Return the C function pointer for the function with given name, or 
-        with the name of this kernel if not provided.
+        Return the C function pointer for the function with given name, or with
+        the name of this kernel if not provided.
         """
         self.compile()
         return cudaq_runtime.jitAndGetFunctionPointer(
@@ -270,13 +277,21 @@ class PyKernelDecorator(object):
         self.compile()
         return str(self.module)
 
+    def enable_return_to_log(self):
+        """
+        Enable translation from `return` statements to QIR output log
+        """
+        self.compile()
+        self.module.operation.attributes.__setitem__(
+            'quake.cudaq_run', UnitAttr.get(context=self.module.context))
+
     def _repr_svg_(self):
         """
         Return the SVG representation of `self` (:class:`PyKernelDecorator`).
-        This assumes no arguments are required to execute the kernel,
-        and `latex` (with `quantikz` package) and `dvisvgm` are installed,
-        and the temporary directory is writable.
-        If any of these assumptions fail, returns None.
+        This assumes no arguments are required to execute the kernel, and
+        `latex` (with `quantikz` package) and `dvisvgm` are installed, and the
+        temporary directory is writable.  If any of these assumptions fail,
+        returns None.
         """
         self.compile()  # compile if not yet compiled
         if self.argTypes is None or len(self.argTypes) != 0:
@@ -293,39 +308,82 @@ class PyKernelDecorator(object):
         except ImportError:
             return None
 
-    def isCastable(self, fromTy, toTy):
+    def isCastablePyType(self, fromTy, toTy):
+        if IntegerType.isinstance(toTy) and IntegerType(toTy).width != 1:
+            return IntegerType.isinstance(fromTy) and IntegerType(
+                fromTy).width != 1
+
         if F64Type.isinstance(toTy):
             return F32Type.isinstance(fromTy) or IntegerType.isinstance(fromTy)
 
         if F32Type.isinstance(toTy):
             return F64Type.isinstance(fromTy) or IntegerType.isinstance(fromTy)
 
+        if F64Type.isinstance(toTy):
+            return F32Type.isinstance(fromTy) or IntegerType.isinstance(fromTy)
+
         if ComplexType.isinstance(toTy):
             floatToType = ComplexType(toTy).element_type
             if ComplexType.isinstance(fromTy):
                 floatFromType = ComplexType(fromTy).element_type
-                return self.isCastable(floatFromType, floatToType)
+                return self.isCastablePyType(floatFromType, floatToType)
 
-            return fromTy == floatToType or self.isCastable(fromTy, floatToType)
+            return fromTy == floatToType or self.isCastablePyType(
+                fromTy, floatToType)
+
+        # Support passing `list[int]` to a `list[float]` argument and
+        # passing `list[int]` or `list[float]` to a `list[complex]` argument.
+        if cc.StdvecType.isinstance(fromTy):
+            if cc.StdvecType.isinstance(toTy):
+                fromEleTy = cc.StdvecType.getElementType(fromTy)
+                toEleTy = cc.StdvecType.getElementType(toTy)
+
+                return self.isCastablePyType(fromEleTy, toEleTy)
 
         return False
 
-    def castPyList(self, fromEleTy, toEleTy, list):
-        if self.isCastable(fromEleTy, toEleTy):
-            if F64Type.isinstance(toEleTy):
-                return [float(i) for i in list]
+    def castPyType(self, fromTy, toTy, value):
+        if self.isCastablePyType(fromTy, toTy):
+            if IntegerType.isinstance(toTy):
+                intToTy = IntegerType(toTy)
+                if intToTy.width == 1:
+                    return bool(value)
+                if intToTy.width == 8:
+                    return np.int8(value)
+                if intToTy.width == 16:
+                    return np.int16(value)
+                if intToTy.width == 32:
+                    return np.int32(value)
+                if intToTy.width == 64:
+                    return int(value)
 
-            if F32Type.isinstance(toEleTy):
-                return [np.float32(i) for i in list]
+            if F64Type.isinstance(toTy):
+                return float(value)
 
-            if ComplexType.isinstance(toEleTy):
-                floatToType = ComplexType(toEleTy).element_type
+            if F32Type.isinstance(toTy):
+                return np.float32(value)
+
+            if ComplexType.isinstance(toTy):
+                floatToType = ComplexType(toTy).element_type
 
                 if F64Type.isinstance(floatToType):
-                    return [complex(i) for i in list]
+                    return complex(value)
 
-                return [np.complex64(i) for i in list]
-        return list
+                return np.complex64(value)
+
+            # Support passing `list[int]` to a `list[float]` argument and
+            # passing `list[int]` or `list[float]` to a `list[complex]` argument
+            if cc.StdvecType.isinstance(fromTy):
+                if cc.StdvecType.isinstance(toTy):
+                    fromEleTy = cc.StdvecType.getElementType(fromTy)
+                    toEleTy = cc.StdvecType.getElementType(toTy)
+
+                    if self.isCastablePyType(fromEleTy, toEleTy):
+                        return [
+                            self.castPyType(fromEleTy, toEleTy, element)
+                            for element in value
+                        ]
+        return value
 
     def createStorage(self):
         ctx = None if self.module == None else self.module.context
@@ -385,6 +443,36 @@ class PyKernelDecorator(object):
             location=j['location'],
             overrideGlobalScopedVars=overrideDict)
 
+    def __convertStringsToPauli__(self, arg):
+        if isinstance(arg, str):
+            # Only allow `pauli_word` as string input
+            emitErrorIfInvalidPauli(arg)
+            return cudaq_runtime.pauli_word(arg)
+
+        if issubclass(type(arg), list):
+            return [self.__convertStringsToPauli__(a) for a in arg]
+
+        return arg
+
+    def processCallableArg(self, arg):
+        """
+        Process a callable argument
+        """
+        if not isinstance(arg, PyKernelDecorator):
+            emitFatalError(
+                "Callable argument provided is not a cudaq.kernel decorated function."
+            )
+        # It may be that the provided input callable kernel
+        # is not currently in the ModuleOp. Need to add it
+        # if that is the case, we have to use the AST
+        # so that it shares self.module's MLIR Context
+        symbols = SymbolTable(self.module.operation)
+        if nvqppPrefix + arg.name not in symbols:
+            tmpBridge = PyASTBridge(self.capturedDataStorage,
+                                    existingModule=self.module,
+                                    disableEntryPointTag=True)
+            tmpBridge.visit(globalAstRegistry[arg.name][0])
+
     def __call__(self, *args):
         """
         Invoke the CUDA-Q kernel. JIT compilation of the kernel AST to MLIR 
@@ -392,32 +480,9 @@ class PyKernelDecorator(object):
         requires custom handling.
         """
 
-        # Check if target is set
-        try:
-            target_name = cudaq_runtime.get_target().name
-        except RuntimeError:
-            target_name = None
-
-        if 'orca-photonics' == target_name:
-            if self.kernelFunction is None:
-                raise RuntimeError(
-                    "The 'orca-photonics' target must be used with a valid function."
-                )
-            # NOTE: Since this handler does not support MLIR mode (yet), just
-            # invoke the kernel. If calling from a bound function, need to
-            # unpack the arguments, for example, see `pyGetStateLibraryMode`
-            try:
-                context_name = cudaq_runtime.getExecutionContextName()
-            except RuntimeError:
-                context_name = None
-            callable_args = args
-            if "extract-state" == context_name and len(args) == 1:
-                callable_args = args[0]
-            PhotonicsHandler(self.kernelFunction)(*callable_args)
+        handler = get_target_handler()
+        if handler.call_processed(self.kernelFunction, args) is True:
             return
-
-        # Prepare captured state storage for the run
-        self.capturedDataStorage = self.createStorage()
 
         # Compile, no-op if the module is not None
         self.compile()
@@ -434,34 +499,17 @@ class PyKernelDecorator(object):
             if isinstance(arg, PyKernelDecorator):
                 arg.compile()
 
-            if isinstance(arg, str):
-                # Only allow `pauli_word` as string input
-                emitErrorIfInvalidPauli(arg)
-                arg = cudaq_runtime.pauli_word(arg)
-
-            if issubclass(type(arg), list):
-                if all(isinstance(a, str) for a in arg):
-                    [emitErrorIfInvalidPauli(a) for a in arg]
-                    arg = [cudaq_runtime.pauli_word(a) for a in arg]
-
+            arg = self.__convertStringsToPauli__(arg)
             mlirType = mlirTypeFromPyType(type(arg),
                                           self.module.context,
                                           argInstance=arg,
                                           argTypeToCompareTo=self.argTypes[i])
 
-            # Support passing `list[int]` to a `list[float]` argument
-            # Support passing `list[int]` or `list[float]` to a `list[complex]` argument
-            if cc.StdvecType.isinstance(mlirType):
-                if cc.StdvecType.isinstance(self.argTypes[i]):
-                    argEleTy = cc.StdvecType.getElementType(mlirType)  # actual
-                    eleTy = cc.StdvecType.getElementType(
-                        self.argTypes[i])  # formal
-
-                    if self.isCastable(argEleTy, eleTy):
-                        processedArgs.append(
-                            self.castPyList(argEleTy, eleTy, arg))
-                        mlirType = self.argTypes[i]
-                        continue
+            if self.isCastablePyType(mlirType, self.argTypes[i]):
+                processedArgs.append(
+                    self.castPyType(mlirType, self.argTypes[i], arg))
+                mlirType = self.argTypes[i]
+                continue
 
             if not cc.CallableType.isinstance(
                     mlirType) and mlirType != self.argTypes[i]:
@@ -472,16 +520,7 @@ class PyKernelDecorator(object):
             if cc.CallableType.isinstance(mlirType):
                 # Assume this is a PyKernelDecorator
                 callableNames.append(arg.name)
-                # It may be that the provided input callable kernel
-                # is not currently in the ModuleOp. Need to add it
-                # if that is the case, we have to use the AST
-                # so that it shares self.module's MLIR Context
-                symbols = SymbolTable(self.module.operation)
-                if nvqppPrefix + arg.name not in symbols:
-                    tmpBridge = PyASTBridge(self.capturedDataStorage,
-                                            existingModule=self.module,
-                                            disableEntryPointTag=True)
-                    tmpBridge.visit(globalAstRegistry[arg.name][0])
+                self.processCallableArg(arg)
 
             # Convert `numpy` arrays to lists
             if cc.StdvecType.isinstance(mlirType) and hasattr(arg, "tolist"):
@@ -498,8 +537,6 @@ class PyKernelDecorator(object):
                                             self.module,
                                             *processedArgs,
                                             callable_names=callableNames)
-            self.capturedDataStorage.__del__()
-            self.capturedDataStorage = None
         else:
             result = cudaq_runtime.pyAltLaunchKernelR(
                 self.name,
@@ -507,18 +544,14 @@ class PyKernelDecorator(object):
                 mlirTypeFromPyType(self.returnType, self.module.context),
                 *processedArgs,
                 callable_names=callableNames)
-
-            self.capturedDataStorage.__del__()
-            self.capturedDataStorage = None
             return result
 
 
 def kernel(function=None, **kwargs):
     """
-    The `cudaq.kernel` represents the CUDA-Q language function 
-    attribute that programmers leverage to indicate the following function 
-    is a CUDA-Q kernel and should be compile and executed on 
-    an available quantum coprocessor.
+    The `cudaq.kernel` represents the CUDA-Q language function attribute that
+    programmers leverage to indicate the following function is a CUDA-Q kernel
+    and should be compile and executed on an available quantum coprocessor.
 
     Verbose logging can be enabled via `verbose=True`. 
     """

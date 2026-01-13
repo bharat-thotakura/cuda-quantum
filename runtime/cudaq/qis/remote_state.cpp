@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -14,6 +14,8 @@ namespace cudaq {
 void RemoteSimulationState::execute() const {
   if (!state) {
     auto &platform = cudaq::get_platform();
+    // Save the outer execution context (if any) so we can restore it after.
+    auto *outerContext = platform.get_exec_ctx();
     // Create an execution context, indicate this is for
     // extracting the state representation
     ExecutionContext context("extract-state");
@@ -30,6 +32,9 @@ void RemoteSimulationState::execute() const {
     platform.launchKernel(kernelName, args);
     platform.reset_exec_ctx();
     platform.resetLogStream();
+    // Restore the outer context if there was one.
+    if (outerContext)
+      platform.set_exec_ctx(outerContext);
     // Cache the info log if any.
     platformExecutionLog = remoteLogCout.str();
     state = std::move(context.simulationState);
@@ -43,8 +48,9 @@ RemoteSimulationState::~RemoteSimulationState() {
     platformExecutionLog.clear();
   }
 
-  for (std::size_t counter = 0; auto &ptr : args)
-    deleters[counter++](ptr);
+  if (!deleters.empty())
+    for (std::size_t counter = 0; auto &ptr : args)
+      deleters[counter++](ptr);
 
   args.clear();
   deleters.clear();
@@ -107,7 +113,7 @@ void RemoteSimulationState::toHost(std::complex<double> *clientAllocatedData,
   if (state->getPrecision() == cudaq::SimulationState::precision::fp64) {
     state->toHost(clientAllocatedData, numElements);
   } else {
-    cudaq::info("[RemoteSimulationState] Perform data conversion in toHost");
+    CUDAQ_INFO("[RemoteSimulationState] Perform data conversion in toHost");
     std::vector<std::complex<float>> temp(numElements);
     state->toHost(temp.data(), numElements);
     std::copy(temp.begin(), temp.end(), clientAllocatedData);
@@ -121,14 +127,14 @@ void RemoteSimulationState::toHost(std::complex<float> *clientAllocatedData,
   if (state->getPrecision() == cudaq::SimulationState::precision::fp32) {
     state->toHost(clientAllocatedData, numElements);
   } else {
-    cudaq::info("[RemoteSimulationState] Perform data conversion in toHost");
+    CUDAQ_INFO("[RemoteSimulationState] Perform data conversion in toHost");
     std::vector<std::complex<double>> temp(numElements);
     state->toHost(temp.data(), numElements);
     std::copy(temp.begin(), temp.end(), clientAllocatedData);
   }
 }
 
-std::pair<std::string, std::vector<void *>>
+std::optional<std::pair<std::string, std::vector<void *>>>
 RemoteSimulationState::getKernelInfo() const {
   return std::make_pair(kernelName, args);
 }
@@ -143,6 +149,8 @@ std::vector<std::complex<double>> RemoteSimulationState::getAmplitudes(
     return state->getAmplitudes(basisStates);
   }
   auto &platform = cudaq::get_platform();
+  // Save the outer execution context (if any) so we can restore it after.
+  auto *outerContext = platform.get_exec_ctx();
   // Create an execution context, indicate this is for
   // extracting the state representation
   ExecutionContext context("extract-state");
@@ -155,6 +163,9 @@ std::vector<std::complex<double>> RemoteSimulationState::getAmplitudes(
   platform.set_exec_ctx(&context);
   platform.launchKernel(kernelName, args);
   platform.reset_exec_ctx();
+  // Restore the outer context if there was one.
+  if (outerContext)
+    platform.set_exec_ctx(outerContext);
   std::vector<std::complex<double>> amplitudes;
   amplitudes.reserve(basisStates.size());
   for (const auto &basisState : basisStates)
@@ -179,6 +190,8 @@ RemoteSimulationState::overlap(const cudaq::SimulationState &other) {
 
   const auto &otherState = dynamic_cast<const RemoteSimulationState &>(other);
   auto &platform = cudaq::get_platform();
+  // Save the outer execution context (if any) so we can restore it after.
+  auto *outerContext = platform.get_exec_ctx();
   ExecutionContext context("state-overlap");
   context.overlapComputeStates =
       std::make_pair(static_cast<const cudaq::SimulationState *>(this),
@@ -187,6 +200,9 @@ RemoteSimulationState::overlap(const cudaq::SimulationState &other) {
   [[maybe_unused]] auto dynamicResult =
       platform.launchKernel(kernelName, nullptr, nullptr, 0, 0, {});
   platform.reset_exec_ctx();
+  // Restore the outer context if there was one.
+  if (outerContext)
+    platform.set_exec_ctx(outerContext);
   assert(context.overlapResult.has_value());
   return context.overlapResult.value();
 }
@@ -197,9 +213,9 @@ std::size_t RemoteSimulationState::maxQubitCountForFullStateTransfer() {
   if (auto envVal = std::getenv("CUDAQ_REMOTE_STATE_MAX_QUBIT_COUNT")) {
 
     const int val = std::stoi(envVal);
-    cudaq::info("[RemoteSimulationState] Setting remote state data transfer "
-                "qubit count threshold to {}.",
-                val);
+    CUDAQ_INFO("[RemoteSimulationState] Setting remote state data transfer "
+               "qubit count threshold to {}.",
+               val);
     return val;
   }
   return NUM_QUBITS_STATE_TRANSFER;

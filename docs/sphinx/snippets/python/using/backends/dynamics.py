@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -7,13 +7,13 @@
 # ============================================================================ #
 
 # Made up values - not sure what values are reasonable here.
+#[Begin Transmon]
 omega_z = 6.5
 omega_x = 4.0
 omega_d = 0.5
 
-#[Begin Transmon]
 import numpy as np
-from cudaq.operator import *
+from cudaq import spin, ScalarOperator
 
 # Qubit Hamiltonian
 hamiltonian = 0.5 * omega_z * spin.z(0)
@@ -29,6 +29,7 @@ n_steps = 100
 #[Begin Evolve]
 import cudaq
 import cupy as cp
+from cudaq.dynamics import Schedule
 
 # Set the target to our dynamics simulator
 cudaq.set_target("dynamics")
@@ -45,15 +46,14 @@ steps = np.linspace(0, t_final, n_steps)
 schedule = Schedule(steps, ["t"])
 
 # Run the simulation.
-evolution_result = evolve(hamiltonian,
-                          dimensions,
-                          schedule,
-                          rho0,
-                          observables=[spin.x(0),
-                                       spin.y(0),
-                                       spin.z(0)],
-                          collapse_operators=[],
-                          store_intermediate_results=True)
+evolution_result = cudaq.evolve(
+    hamiltonian,
+    dimensions,
+    schedule,
+    rho0,
+    observables=[spin.x(0), spin.y(0), spin.z(0)],
+    collapse_operators=[],
+    store_intermediate_results=cudaq.IntermediateResultSave.ALL)
 #[End Evolve]
 
 #[Begin Plot]
@@ -77,6 +77,8 @@ omega_a = 4 * np.pi
 Omega = 0.5
 
 #[Begin Jaynes-Cummings]
+from cudaq import operators
+
 hamiltonian = omega_c * operators.create(1) * operators.annihilate(1) \
                 + (omega_a / 2) * spin.z(0) \
                 + (Omega / 2) * (operators.annihilate(1) * spin.plus(0) + operators.create(1) * spin.minus(0))
@@ -95,7 +97,7 @@ H = H0 + ScalarOperator(lambda t: np.cos(omega * t)) * H1
 #[Begin DefineOp]
 import numpy
 import scipy
-from cudaq.operator import *
+from cudaq import operators, NumericType
 from numpy.typing import NDArray
 
 
@@ -115,18 +117,18 @@ def displacement_matrix(
     return scipy.linalg.expm(term1 - term2)
 
 
-# The second argument here indicates the the defined operator
+# The second argument here indicates the defined operator
 # acts on a single degree of freedom, which can have any dimension.
 # An argument [2], for example, would indicate that it can only
 # act on a single degree of freedom with dimension two.
-ElementaryOperator.define("displace", [0], displacement_matrix)
+operators.define("displace", [0], displacement_matrix)
 
 
-def displacement(degree: int) -> ElementaryOperator:
+def displacement(degree: int) -> operators.MatrixOperatorElement:
     """
     Instantiates a displacement operator acting on the given degree of freedom.
     """
-    return ElementaryOperator("displace", [degree])
+    return operators.instantiate("displace", [degree])
 
 
 #[End DefineOp]
@@ -172,3 +174,70 @@ def parameter_values(time_steps):
 time_dependence = parameter_values(numpy.linspace(0, 1, 100))
 cudaq.evolve(system_operator, system_dimensions, time_dependence, initial_state)
 #[End Schedule2]
+
+#[Begin SuperOperator]
+import cudaq
+from cudaq import spin, Schedule, RungeKuttaIntegrator
+import numpy as np
+
+hamiltonian = 2.0 * np.pi * 0.1 * spin.x(0)
+steps = np.linspace(0, 1, 10)
+schedule = Schedule(steps, ["t"])
+dimensions = {0: 2}
+# initial state
+psi0 = cudaq.dynamics.InitialState.ZERO
+# Create a super-operator that represents the evolution of the system
+# under the Hamiltonian `-iH|psi>`, where `H` is the Hamiltonian.
+se_super_op = cudaq.SuperOperator()
+# Apply `-iH|psi>` super-operator
+se_super_op += cudaq.SuperOperator.left_multiply(-1j * hamiltonian)
+evolution_result = cudaq.evolve(se_super_op,
+                                dimensions,
+                                schedule,
+                                psi0,
+                                observables=[spin.z(0)],
+                                store_intermediate_results=True,
+                                integrator=RungeKuttaIntegrator())
+#[End SuperOperator]
+
+import cudaq
+from cudaq import operators, spin, Schedule, RungeKuttaIntegrator
+
+N = 4
+dimensions = {}
+for i in range(N):
+    dimensions[i] = 2
+g = 1.0
+H = operators.zero()
+for i in range(N):
+    H += 2 * np.pi * spin.x(i)
+    H += 2 * np.pi * spin.y(i)
+for i in range(N - 1):
+    H += 2 * np.pi * g * spin.x(i) * spin.x(i + 1)
+    H += 2 * np.pi * g * spin.y(i) * spin.z(i + 1)
+
+steps = np.linspace(0.0, 1, 200)
+schedule = Schedule(steps, ["time"])
+
+#[Begin MPI]
+cudaq.mpi.initialize()
+
+# Set the target to our dynamics simulator
+cudaq.set_target("dynamics")
+
+# Initial state (expressed as an enum)
+psi0 = cudaq.dynamics.InitialState.ZERO
+
+# Run the simulation
+evolution_result = cudaq.evolve(
+    H,
+    dimensions,
+    schedule,
+    psi0,
+    observables=[],
+    collapse_operators=[],
+    store_intermediate_results=cudaq.IntermediateResultSave.NONE,
+    integrator=RungeKuttaIntegrator())
+
+cudaq.mpi.finalize()
+#[End MPI]

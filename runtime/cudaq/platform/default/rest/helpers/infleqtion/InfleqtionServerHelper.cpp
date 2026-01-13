@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -107,7 +107,7 @@ private:
 
 // Initialize the Infleqtion server helper with a given backend configuration
 void InfleqtionServerHelper::initialize(BackendConfig config) {
-  cudaq::info("Initializing Infleqtion Backend.");
+  CUDAQ_INFO("Initializing Infleqtion Backend.");
 
   // Move the passed config into the member variable backendConfig
   backendConfig = config;

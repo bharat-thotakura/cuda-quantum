@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,15 +7,14 @@
  ******************************************************************************/
 
 #include "cudaq.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Todo.h"
 #include "cudaq/algorithms/observe.h"
+#include "runtime/cudaq/platform/py_alt_launch_kernel.h"
 #include "utils/OpaqueArguments.h"
-
-#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "mlir/Bindings/Python/PybindAdaptors.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-
 #include <fmt/core.h>
 #include <pybind11/stl.h>
 
@@ -41,7 +40,7 @@ std::tuple<bool, std::string> isValidObserveKernel(py::object &kernel) {
   ModuleOp mod = unwrap(kernelMod);
   func::FuncOp kernelFunc;
   mod.walk([&](func::FuncOp function) {
-    if (function.getName().equals("__nvqpp__mlirgen__" + kernelName)) {
+    if (function.getName() == cudaq::runtime::cudaqGenPrefixName + kernelName) {
       kernelFunc = function;
       return WalkResult::interrupt();
     }
@@ -67,31 +66,34 @@ std::tuple<bool, std::string> isValidObserveKernel(py::object &kernel) {
   return std::make_tuple(true, "");
 }
 
-void pyAltLaunchKernel(const std::string &, MlirModule, OpaqueArguments &,
-                       const std::vector<std::string> &);
-
-async_observe_result pyObserveAsync(py::object &kernel, spin_op &spin_operator,
+async_observe_result pyObserveAsync(py::object &kernel,
+                                    const spin_op &spin_operator,
                                     py::args &args, std::size_t qpu_id,
                                     int shots) {
   if (py::hasattr(kernel, "compile"))
     kernel.attr("compile")();
 
+  if (!py::hasattr(kernel, "arguments"))
+    throw std::runtime_error(
+        "unrecognized kernel - did you forget the @kernel attribute?");
   auto kernelBlockArgs = kernel.attr("arguments");
   if (py::len(kernelBlockArgs) != args.size())
     throw std::runtime_error(
         "Invalid number of arguments passed to observe_async.");
-
+  // Process any callable args
+  const auto callableNames = getCallableNames(kernel, args);
   auto &platform = cudaq::get_platform();
   auto kernelName = kernel.attr("name").cast<std::string>();
   auto kernelMod = kernel.attr("module").cast<MlirModule>();
   args = simplifiedValidateInputArguments(args);
-  auto *argData = toOpaqueArgs(args, kernelMod, kernelName);
+  auto *argData =
+      toOpaqueArgs(args, kernelMod, kernelName, getCallableArgHandler());
 
   // Launch the asynchronous execution.
   py::gil_scoped_release release;
   return details::runObservationAsync(
-      [argData, kernelName, kernelMod]() mutable {
-        pyAltLaunchKernel(kernelName, kernelMod, *argData, {});
+      [argData, kernelName, kernelMod, callableNames]() mutable {
+        pyAltLaunchKernel(kernelName, kernelMod, *argData, callableNames);
         delete argData;
       },
       spin_operator, platform, shots, kernelName, qpu_id);
@@ -142,7 +144,7 @@ observe_result pyObservePar(const PyParType &type, py::object &kernel,
           "[cudaq::observe warning] distributed observe requested but only 1 "
           "QPU available. no speedup expected.\n");
     return details::distributeComputations(
-        [&](std::size_t i, spin_op &op) {
+        [&](std::size_t i, const spin_op &op) {
           return pyObserveAsync(kernel, op, args, i, shots);
         },
         spin_operator, nQpus);
@@ -165,7 +167,7 @@ observe_result pyObservePar(const PyParType &type, py::object &kernel,
 
   // Distribute locally, i.e. to the local nodes QPUs
   auto localRankResult = details::distributeComputations(
-      [&](std::size_t i, spin_op &op) {
+      [&](std::size_t i, const spin_op &op) {
         return pyObserveAsync(kernel, op, args, i, shots);
       },
       localH, nQpus);
@@ -204,7 +206,7 @@ can be retrieved via `future.get()`.
 Args:
   kernel (:class:`Kernel`): The :class:`Kernel` to evaluate the 
     expectation value with respect to.
-  spin_operator (:class:`SpinOperator`): The Hermitian spin operator to 
+  spin_operator (`SpinOperator`): The Hermitian spin operator to 
     calculate the expectation of.
   *arguments (Optional[Any]): The concrete values to evaluate the 
     kernel function at. Leave empty if the kernel doesn't accept any arguments.

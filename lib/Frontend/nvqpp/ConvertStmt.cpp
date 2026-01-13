@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -38,6 +38,17 @@ bool QuakeBridgeVisitor::VisitContinueStmt(clang::ContinueStmt *x) {
   if (builder.getBlock())
     builder.create<cc::UnwindContinueOp>(toLocation(x));
   return true;
+}
+
+bool QuakeBridgeVisitor::TraverseDeclStmt(clang::DeclStmt *x,
+                                          DataRecursionQueue *q) {
+  const auto depthBefore = valueStack.size();
+  auto result = Base::TraverseDeclStmt(x, q);
+  const auto depthAfter = valueStack.size();
+  if (result && depthAfter > depthBefore) {
+    [[maybe_unused]] auto unused = lastValues(depthAfter - depthBefore);
+  }
+  return result;
 }
 
 bool QuakeBridgeVisitor::VisitCompoundAssignOperator(
@@ -132,6 +143,9 @@ bool QuakeBridgeVisitor::TraverseCXXForRangeStmt(clang::CXXForRangeStmt *x,
   auto i64Ty = builder.getI64Type();
   if (auto stdvecTy = dyn_cast<cc::SpanLikeType>(buffer.getType())) {
     auto eleTy = stdvecTy.getElementType();
+    const bool isBool = eleTy == builder.getI1Type();
+    if (isBool)
+      eleTy = builder.getI8Type();
     auto dataPtrTy = cc::PointerType::get(eleTy);
     auto dataArrPtrTy = cc::PointerType::get(cc::ArrayType::get(eleTy));
     auto [iters, ptr, initial,
@@ -204,6 +218,9 @@ bool QuakeBridgeVisitor::TraverseCXXForRangeStmt(clang::CXXForRangeStmt *x,
             }
             auto iterVar = popValue();
             Value atOffset = builder.create<cc::LoadOp>(loc, addr);
+            if (isBool)
+              atOffset = builder.create<cc::CastOp>(loc, builder.getI1Type(),
+                                                    atOffset);
             builder.create<cc::StoreOp>(loc, atOffset, iterVar);
           }
         }
@@ -307,7 +324,14 @@ bool QuakeBridgeVisitor::VisitReturnStmt(clang::ReturnStmt *x) {
     if (isa<cc::PointerType>(resTy)) {
       // Promote reference (T&) to value (T) on a return. (There is not
       // necessarily an explicit cast or promotion node in the AST.)
-      result = builder.create<cc::LoadOp>(loc, result);
+      auto load = builder.create<cc::LoadOp>(loc, result);
+      result = load.getResult();
+      if (load.getType() == builder.getI8Type()) {
+        auto fnTy = load->getParentOfType<func::FuncOp>().getFunctionType();
+        auto i1Ty = builder.getI1Type();
+        if (fnTy.getNumResults() == 1 && fnTy.getResult(0) == i1Ty)
+          result = builder.create<cc::CastOp>(loc, i1Ty, result);
+      }
     }
     if (auto vecTy = dyn_cast<cc::SpanLikeType>(resTy)) {
       // Returning vector data that was allocated on the stack is not valid.
@@ -335,6 +359,9 @@ bool QuakeBridgeVisitor::VisitReturnStmt(clang::ReturnStmt *x) {
       if (!cudaq::cc::isDynamicType(eleTy))
         tySize = irb.getByteSizeOfType(loc, eleTy);
       if (!tySize) {
+        // TODO: we need to recursively create copies of all
+        // dynamic memory used within the type. See the
+        // implementation of `visit_Return` in the Python bridge.
         TODO_x(toLocation(x), x, mangler, "unhandled vector element type");
         return false;
       }

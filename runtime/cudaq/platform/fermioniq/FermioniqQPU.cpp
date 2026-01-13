@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -25,7 +25,7 @@ protected:
   extractQuakeCodeAndContext(const std::string &kernelName,
                              void *data) override {
 
-    cudaq::info("extract quake code\n");
+    CUDAQ_INFO("extract quake code\n");
 
     auto contextPtr = cudaq::initializeMLIR();
     MLIRContext &context = *contextPtr.get();

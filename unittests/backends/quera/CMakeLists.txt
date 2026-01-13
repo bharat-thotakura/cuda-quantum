@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -14,6 +14,7 @@ endif()
 target_include_directories(test_quera PRIVATE ../..)
 target_link_libraries(test_quera PRIVATE 
     fmt::fmt-header-only 
+    cudaq
     cudaq-common 
     gtest_main
 )

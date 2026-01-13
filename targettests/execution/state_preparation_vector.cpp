@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates and Contributors. *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -8,17 +8,15 @@
 
 // clang-format off
 // Simulators
-// RUN: nvq++ %cpp_std %s -o %t && %t | FileCheck %s
+// RUN: nvq++ %s -o %t && %t | FileCheck %s
 
 // Quantum emulators
-// RUN: nvq++ %cpp_std -target braket     -emulate %s -o %t && %t | FileCheck %s
-// RUN: nvq++ %cpp_std -target quantinuum -emulate %s -o %t && %t | FileCheck %s
-// RUN: nvq++ %cpp_std -target ionq       -emulate %s -o %t && %t | FileCheck %s
-// RUN: nvq++ %cpp_std -target oqc        -emulate %s -o %t && %t | FileCheck %s
-
-// 2 different IQM machines for 2 different topologies
-// RUN: nvq++ %cpp_std -target iqm --iqm-machine Adonis -emulate %s -o %t && %t | FileCheck %s
-// RUN: nvq++ %cpp_std -target iqm --iqm-machine Apollo -emulate %s -o %t && %t | FileCheck %s
+// RUN: if %braket_avail; then nvq++ -target braket -emulate %s -o %t && %t | FileCheck %s ; fi
+// RUN: if %qci_avail; then nvq++ --target qci --emulate %s -o %t && %t | FileCheck %s; fi
+// RUN: nvq++ -target quantinuum -emulate %s -o %t && %t | FileCheck %s
+// RUN: nvq++ -target ionq       -emulate %s -o %t && %t | FileCheck %s
+// RUN: nvq++ -target oqc        -emulate %s -o %t && %t | FileCheck %s
+// RUN: nvq++ --target iqm      --emulate %s -o %t && IQM_QPU_QA=%iqm_tests_dir/Crystal_5.txt  %t | FileCheck %s
 // clang-format on
 
 #include <cudaq.h>
@@ -35,17 +33,10 @@ __qpu__ void test_complex_constant_array() {
   cudaq::qvector v(std::vector<cudaq::complex>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
 }
 
-#ifdef CUDAQ_SIMULATION_SCALAR_FP32
 __qpu__ void test_complex_constant_array_floating_point() {
   cudaq::qvector v(
-      std::vector<std::complex<float>>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
+      std::vector<std::complex<cudaq::real>>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
 }
-#else
-__qpu__ void test_complex_constant_array_floating_point() {
-  cudaq::qvector v(
-      std::vector<std::complex<double>>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
-}
-#endif
 
 __qpu__ void test_complex_constant_array2() {
   cudaq::qvector v1(
@@ -63,45 +54,27 @@ __qpu__ void test_complex_array_param(std::vector<cudaq::complex> inState) {
   cudaq::qvector q1 = inState;
 }
 
-#ifdef CUDAQ_SIMULATION_SCALAR_FP32
 __qpu__ void test_complex_array_param_floating_point(
-    std::vector<std::complex<float>> inState) {
+    std::vector<std::complex<cudaq::real>> inState) {
   cudaq::qvector q1 = inState;
 }
-#else
-__qpu__ void test_complex_array_param_floating_point(
-    std::vector<std::complex<double>> inState) {
-  cudaq::qvector q1 = inState;
-}
-#endif
 
 __qpu__ void test_real_constant_array() {
   cudaq::qvector v({M_SQRT1_2, M_SQRT1_2, 0., 0.});
 }
 
-#ifdef CUDAQ_SIMULATION_SCALAR_FP32
 __qpu__ void test_real_constant_array_floating_point() {
-  cudaq::qvector v(std::vector<float>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
+  cudaq::qvector v(std::vector<cudaq::real>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
 }
-#else
-__qpu__ void test_real_constant_array_floating_point() {
-  cudaq::qvector v(std::vector<double>({M_SQRT1_2, M_SQRT1_2, 0., 0.}));
-}
-#endif
 
 __qpu__ void test_real_array_param(std::vector<cudaq::real> inState) {
   cudaq::qvector q1 = inState;
 }
 
-#ifdef CUDAQ_SIMULATION_SCALAR_FP32
-__qpu__ void test_real_array_param_floating_point(std::vector<float> inState) {
+__qpu__ void
+test_real_array_param_floating_point(std::vector<cudaq::real> inState) {
   cudaq::qvector q1 = inState;
 }
-#else
-__qpu__ void test_real_array_param_floating_point(std::vector<double> inState) {
-  cudaq::qvector q1 = inState;
-}
-#endif
 
 void printCounts(cudaq::sample_result &result) {
   std::vector<std::string> values{};

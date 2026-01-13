@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -14,9 +14,14 @@
 
 namespace nvqir {
 /// @brief Base class of `cutensornet` simulator backends
-class SimulatorTensorNetBase : public nvqir::CircuitSimulatorBase<double> {
-
+template <typename ScalarType = double>
+class SimulatorTensorNetBase : public nvqir::CircuitSimulatorBase<ScalarType> {
 public:
+  using DataType = std::complex<ScalarType>;
+  static constexpr cudaDataType_t cudaDataType =
+      std::is_same_v<ScalarType, float> ? CUDA_C_32F : CUDA_C_64F;
+  using GateApplicationTask =
+      typename nvqir::CircuitSimulatorBase<ScalarType>::GateApplicationTask;
   SimulatorTensorNetBase();
   SimulatorTensorNetBase(const SimulatorTensorNetBase &another) = delete;
   SimulatorTensorNetBase &
@@ -29,6 +34,18 @@ public:
 
   /// @brief Apply quantum gate
   void applyGate(const GateApplicationTask &task) override;
+
+  /// @brief Apply a noise channel
+  void applyNoiseChannel(const std::string_view gateName,
+                         const std::vector<std::size_t> &controls,
+                         const std::vector<std::size_t> &targets,
+                         const std::vector<double> &params) override;
+
+  bool isValidNoiseChannel(const cudaq::noise_model_type &type) const override;
+
+  /// @brief Apply the given kraus_channel on the provided targets.
+  void applyNoise(const cudaq::kraus_channel &channel,
+                  const std::vector<std::size_t> &targets) override;
 
   // Override base calculateStateDim (we don't instantiate full state vector in
   // the tensornet backend). When the user want to retrieve the state vector, we
@@ -88,14 +105,44 @@ protected:
   /// @brief Query if direct expectation value calculation is enabled
   virtual bool canHandleObserve() override;
 
+  /// @brief Return true if this simulator can use cache workspace (e.g., for
+  /// intermediate tensors)
+  virtual bool requireCacheWorkspace() const = 0;
+
+  /// @brief Return true if this simulator handle general noise channel
+  /// (non-unitary).
+  virtual bool canHandleGeneralNoiseChannel() const = 0;
+
+private:
+  // Helper to apply a Kraus channel
+  void applyKrausChannel(const std::vector<int32_t> &qubits,
+                         const cudaq::kraus_channel &channel);
+
 protected:
   cutensornetHandle_t m_cutnHandle;
-  std::unique_ptr<TensorNetState> m_state;
+  std::unique_ptr<TensorNetState<ScalarType>> m_state;
   std::unordered_map<std::string, void *> m_gateDeviceMemCache;
   ScratchDeviceMem scratchPad;
   // Random number generator for generating 32-bit numbers with a state size of
   // 19937 bits for measurements.
   std::mt19937 m_randomEngine;
+  // Max number of controlled ranks (qubits) that the full matrix of the
+  // controlled gate is used as tensor op.
+  // Default is 1.
+  // MPS only supports 1 (higher number of controlled ranks must use
+  // cutensornetStateApplyControlledTensorOperator). Tensornet supports
+  // arbitrary values.
+  std::size_t m_maxControlledRankForFullTensorExpansion = 1;
+
+  // Flag to enable contraction path reuse when computing the expectation value
+  // (observe).
+  //   Default is off (no contraction path reuse).
+  //   Reusing the path, while saving the path finding time, prevents lightcone
+  //   simplification, e.g., when the spin op is sparse (only acting on a few
+  //   qubits).
+  bool m_reuseContractionPathObserve = false;
 };
 
 } // end namespace nvqir
+
+#include "simulator_cutensornet.inc"

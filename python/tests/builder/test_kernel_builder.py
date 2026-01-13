@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -12,7 +12,7 @@
 import pytest
 import random
 import numpy as np
-import sys
+import os
 from typing import List
 
 import cudaq
@@ -900,7 +900,7 @@ def test_state_capture():
 
 @skipIfNvidiaFP64NotInstalled
 def test_from_state0():
-    cudaq.set_target('nvidia-fp64')
+    cudaq.set_target('nvidia', option='fp64')
 
     kernel, initState = cudaq.make_kernel(list[complex])
     qubits = kernel.qalloc(initState)
@@ -1216,10 +1216,13 @@ def test_call_kernel_expressions_List():
                       atol=1e-2)
 
     kernelAndArgs = cudaq.make_kernel(List[bool])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [False, True, False])
     kernelAndArgs = cudaq.make_kernel(List[int])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [1, 2, 3, 4])
     kernelAndArgs = cudaq.make_kernel(List[float])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [5.5, 6.5, 7.5])
 
 
@@ -1260,11 +1263,20 @@ def test_call_kernel_expressions_list():
                       atol=1e-2)
 
     kernelAndArgs = cudaq.make_kernel(list[bool])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [False, True, False])
     kernelAndArgs = cudaq.make_kernel(list[int])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [1, 2, 3, 4])
     kernelAndArgs = cudaq.make_kernel(list[float])
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], [5.5, 6.5, 7.5])
+
+
+def test_sample_with_no_qubits():
+    kernel = cudaq.make_kernel()
+    with pytest.raises(RuntimeError) as e:
+        cudaq.sample(kernel)
 
 
 def test_adequate_number_params():
@@ -1352,6 +1364,7 @@ def test_list_subscript():
     kernelAndArgs = cudaq.make_kernel(bool, list[bool], List[int], list[float])
     print(kernelAndArgs[0])
     assert len(kernelAndArgs) == 5 and len(kernelAndArgs[0].arguments) == 4
+    qubits = kernelAndArgs[0].qalloc(1)
     cudaq.sample(kernelAndArgs[0], False, [False], [3], [3.5])
 
     # Test can call with empty list
@@ -1383,7 +1396,7 @@ def test_u3_ctrl():
 @skipIfNvidiaFP64NotInstalled
 def test_builder_rotate_state():
     cudaq.reset_target()
-    cudaq.set_target('nvidia-fp64')
+    cudaq.set_target('nvidia', option='fp64')
 
     c = [0., 0., 0., 1.]
 
@@ -1429,6 +1442,17 @@ def test_issue_670():
     kernel.ry(0.1, qubits)
 
     cudaq.sample(kernel)
+
+
+def test_call_invalid_attribute_on_a_kernel():
+
+    with pytest.raises(AttributeError) as e:
+        kernel, op = cudaq.make_kernel(cudaq.pauli_word)
+        q = kernel.qalloc(2)
+        kernel.x(q[1])
+        kernel.op(q[0])
+        result = cudaq.sample(kernel, cudaq.pauli_word("X"))
+    assert "not supported on PyKernel" in str(e.value)
 
 
 # leave for gdb debugging

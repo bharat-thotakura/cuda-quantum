@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -44,8 +44,19 @@ public:
             loc, ValueRange(),
             ValueRange{op.getControls()[negationIter.index()]});
 
-    rewriter.create<Op>(loc, op.getIsAdj(), op.getParameters(),
-                        op.getControls(), op.getTargets());
+    if constexpr (std::is_same_v<Op, quake::ExpPauliOp>) {
+      rewriter.create<quake::ExpPauliOp>(
+          loc, TypeRange{}, op.getIsAdjAttr(), op.getParameters(),
+          op.getControls(), op.getTargets(), op.getNegatedQubitControlsAttr(),
+          op.getPauli(), op.getPauliLiteralAttr());
+    } else if constexpr (std::is_same_v<Op, quake::CustomUnitarySymbolOp>) {
+      rewriter.create<Op>(loc, op.getGeneratorAttr(), op.getIsAdj(),
+                          op.getParameters(), op.getControls(),
+                          op.getTargets());
+    } else {
+      rewriter.create<Op>(loc, op.getIsAdj(), op.getParameters(),
+                          op.getControls(), op.getTargets());
+    }
 
     for (auto negationIter : llvm::enumerate(negations.value()))
       if (negationIter.value())
@@ -76,7 +87,11 @@ struct ApplyControlNegationsPass
         ReplaceNegativeControl<quake::RxOp>,
         ReplaceNegativeControl<quake::RyOp>,
         ReplaceNegativeControl<quake::RzOp>,
-        ReplaceNegativeControl<quake::R1Op>>(ctx);
+        ReplaceNegativeControl<quake::R1Op>,
+        ReplaceNegativeControl<quake::U3Op>,
+        ReplaceNegativeControl<quake::SwapOp>,
+        ReplaceNegativeControl<quake::ExpPauliOp>,
+        ReplaceNegativeControl<quake::CustomUnitarySymbolOp>>(ctx);
     ConversionTarget target(*ctx);
     target.addLegalDialect<cudaq::cc::CCDialect, arith::ArithDialect,
                            LLVM::LLVMDialect>();

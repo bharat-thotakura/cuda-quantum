@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -10,7 +10,7 @@ set(CONFIG_FILES
   CUDAQCommonConfig.cmake
   CUDAQEmDefaultConfig.cmake
   CUDAQNloptConfig.cmake
-  CUDAQSpinConfig.cmake
+  CUDAQOperatorConfig.cmake
   CUDAQConfig.cmake
   CUDAQEnsmallenConfig.cmake
   CUDAQPlatformDefaultConfig.cmake
@@ -40,3 +40,5 @@ configure_file(
 install(FILES ${CONFIG_FILES} DESTINATION lib/cmake/cudaq)
 install(FILES ${LANG_FILES} DESTINATION lib/cmake/cudaq)
 install(FILES ${CMAKE_BINARY_DIR}/cmake/Modules/NVQIRConfig.cmake DESTINATION lib/cmake/nvqir)
+# Note: we split the default target config generation into a separate file so that we can test it independently.
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/NVQIRTargetConfigGen.cmake DESTINATION lib/cmake/nvqir)

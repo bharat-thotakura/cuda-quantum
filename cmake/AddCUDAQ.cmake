@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This file is derived from                                                    #
@@ -55,7 +55,7 @@ function(add_cudaq_dialect_doc dialect dialect_namespace)
 endfunction()
 
 function(add_cudaq_library name)
-  add_mlir_library(${ARGV})
+  add_mlir_library(${ARGV} DISABLE_INSTALL)
   add_cudaq_library_install(${name})
 endfunction()
 

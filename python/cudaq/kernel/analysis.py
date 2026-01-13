@@ -1,95 +1,19 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-import ast, inspect, importlib, textwrap
+import ast
+import inspect
+import importlib
+import textwrap
+
+from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
+from cudaq.mlir.dialects import cc
 from .utils import globalAstRegistry, globalKernelRegistry, mlirTypeFromAnnotation
-from ..mlir.dialects import cc
-from ..mlir.ir import *
-from ..mlir._mlir_libs._quakeDialects import cudaq_runtime
-
-
-class MidCircuitMeasurementAnalyzer(ast.NodeVisitor):
-    """
-    The `MidCircuitMeasurementAnalyzer` is a utility class searches for 
-    common measurement - conditional patterns to indicate to the runtime 
-    that we have a circuit with mid-circuit measurement and subsequent conditional 
-    quantum operation application.
-    """
-
-    def __init__(self):
-        self.measureResultsVars = []
-        self.hasMidCircuitMeasures = False
-
-    def isMeasureCallOp(self, node):
-        return isinstance(
-            node, ast.Call) and node.__dict__['func'].id in ['mx', 'my', 'mz']
-
-    def visit_Assign(self, node):
-        target = node.targets[0]
-        # Check if a variable is assigned from result(s) of measurement
-        if hasattr(node, 'value') and hasattr(
-                node.value, 'id') and node.value.id in self.measureResultsVars:
-            self.measureResultsVars.append(target.id)
-            return
-        if not 'func' in node.value.__dict__:
-            return
-        creatorFunc = node.value.func
-        if 'id' in creatorFunc.__dict__ and creatorFunc.id in [
-                'mx', 'my', 'mz'
-        ]:
-            self.measureResultsVars.append(target.id)
-
-    # Get the variable name from a variable node.
-    # Returns an empty string if not something we know how to get a variable name from.
-    def getVariableName(self, node):
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Subscript):
-            return self.getVariableName(node.value)
-        return ''
-
-    def checkForMeasureResult(self, value):
-        return self.isMeasureCallOp(value) or self.getVariableName(
-            value) in self.measureResultsVars
-
-    def visit_If(self, node):
-        condition = node.test
-
-        # Catch `if mz(q)`, `if val`, where `val = mz(q)` or `if var[k]`, where `var = mz(qvec)`
-        if self.checkForMeasureResult(condition):
-            self.hasMidCircuitMeasures = True
-            return
-
-        # Compare: look at left expression.
-        # Catch `if var == True/False` and `if var[k] == True/False:` or `if mz(q) == True/False`
-        if isinstance(condition, ast.Compare) and self.checkForMeasureResult(
-                condition.left):
-            self.hasMidCircuitMeasures = True
-            return
-
-        # Catch `if UnaryOp mz(q)` or `if UnaryOp var` (`var = mz(q)`)
-        if isinstance(condition, ast.UnaryOp) and self.checkForMeasureResult(
-                condition.operand):
-            self.hasMidCircuitMeasures = True
-            return
-
-        # Catch `if something BoolOp mz(q)` or `something BoolOp var` (`var = mz(q)`)
-        if isinstance(condition, ast.BoolOp) and 'values' in condition.__dict__:
-
-            for value in condition.__dict__['values']:
-                if self.checkForMeasureResult(value):
-                    self.hasMidCircuitMeasures = True
-                    return
-                if isinstance(value,
-                              ast.Compare) and self.checkForMeasureResult(
-                                  value.left):
-                    self.hasMidCircuitMeasures = True
-                    return
 
 
 class FindDepKernelsVisitor(ast.NodeVisitor):
@@ -129,68 +53,20 @@ class FindDepKernelsVisitor(ast.NodeVisitor):
                             cc.CallableType.getFunctionType(callableTy)):
                         self.depKernels[k] = globalAstRegistry[k]
 
-        self.generic_visit(node)
+        [self.visit(stm) for stm in node.body]
 
-    def visit_Call(self, node):
-        """
-        Here we look for function calls within this kernel. We will 
-        add these to dependent kernels dictionary. We will also look for 
-        kernels that are passed to control and adjoint.
-        """
-        if hasattr(node, 'func'):
-            if isinstance(node.func,
-                          ast.Name) and node.func.id in globalAstRegistry:
-                self.depKernels[node.func.id] = globalAstRegistry[node.func.id]
-            elif isinstance(node.func, ast.Attribute):
-                if hasattr(
-                        node.func.value, 'id'
-                ) and node.func.value.id == 'cudaq' and node.func.attr == 'kernel':
-                    return
-                # May need to somehow import a library kernel, find
-                # all module names in a mod1.mod2.mod3.function type call
-                moduleNames = []
-                value = node.func.value
-                while isinstance(value, ast.Attribute):
-                    moduleNames.append(value.attr)
-                    value = value.value
-                    if isinstance(value, ast.Name):
-                        moduleNames.append(value.id)
-                        break
+    def visit_Attribute(self, node):
+        if not self.kernelName:
+            return
+        if node.attr in globalAstRegistry:
+            self.depKernels[node.attr] = globalAstRegistry[node.attr]
+        self.visit(node.value)
 
-                if all(x in moduleNames for x in ['cudaq', 'dbg', 'ast']):
-                    return
-
-                if len(moduleNames):
-                    moduleNames.reverse()
-                    if cudaq_runtime.isRegisteredDeviceModule(
-                            '.'.join(moduleNames)):
-                        return
-
-                    # This will throw if the function / module is invalid
-                    try:
-                        m = importlib.import_module('.'.join(moduleNames))
-                    except:
-                        return
-
-                    getattr(m, node.func.attr)
-                    name = node.func.attr
-
-                    if name not in globalAstRegistry:
-                        raise RuntimeError(
-                            f"{name} is not a valid kernel to call ({'.'.join(moduleNames)})."
-                        )
-
-                    self.depKernels[name] = globalAstRegistry[name]
-
-                elif hasattr(node.func,
-                             'attr') and node.func.attr in globalAstRegistry:
-                    self.depKernels[node.func.attr] = globalAstRegistry[
-                        node.func.attr]
-                elif node.func.value.id == 'cudaq' and node.func.attr in [
-                        'control', 'adjoint'
-                ] and node.args[0].id in globalAstRegistry:
-                    self.depKernels[node.args[0].id] = globalAstRegistry[
-                        node.args[0].id]
+    def visit_Name(self, node):
+        if not self.kernelName:
+            return
+        if node.id in globalAstRegistry:
+            self.depKernels[node.id] = globalAstRegistry[node.id]
 
 
 class HasReturnNodeVisitor(ast.NodeVisitor):
@@ -309,3 +185,63 @@ class FetchDepFuncsSourceCode:
             code += src + '\n'
 
         return code
+
+
+class ValidateArgumentAnnotations(ast.NodeVisitor):
+    """
+    Utility visitor for finding argument annotations
+    """
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+
+    def visit_FunctionDef(self, node):
+        for arg in node.args.args:
+            if arg.annotation == None:
+                self.bridge.emitFatalError(
+                    'cudaq.kernel functions must have argument type annotations.',
+                    arg)
+
+
+class ValidateReturnStatements(ast.NodeVisitor):
+    """
+    Analyze the AST and ensure that functions with a return-type annotation
+    actually have a return statement in all paths.
+    """
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+
+    def visit_FunctionDef(self, node):
+        # skip if un-annotated or explicitly marked as None
+        is_none_ret = (isinstance(node.returns, ast.Constant) and
+                       node.returns.value
+                       is None) or (isinstance(node.returns, ast.Name) and
+                                    node.returns.id == 'None')
+
+        if node.returns is None or is_none_ret:
+            return self.generic_visit(node)
+
+        def all_paths_return(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, ast.Return):
+                    return True
+
+                if isinstance(stmt, ast.If):
+                    if all_paths_return(stmt.body) and all_paths_return(
+                            stmt.orelse):
+                        return True
+
+                if isinstance(stmt, (ast.For, ast.While)):
+                    if all_paths_return(stmt.body) or all_paths_return(
+                            stmt.orelse):
+                        return True
+
+            return False
+
+        if not all_paths_return(node.body):
+            self.bridge.emitFatalError(
+                'cudaq.kernel functions with return type annotations must have a return statement.',
+                node)
+
+        self.generic_visit(node)

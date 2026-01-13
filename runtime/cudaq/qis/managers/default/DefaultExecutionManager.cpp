@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,9 +7,9 @@
  ******************************************************************************/
 
 #include "common/Logger.h"
+#include "cudaq/operators.h"
 #include "cudaq/qis/managers/BasicExecutionManager.h"
 #include "cudaq/qis/qudit.h"
-#include "cudaq/spin_op.h"
 #include "cudaq/utils/cudaq_utils.h"
 #include "nvqir/CircuitSimulator.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -149,9 +149,9 @@ protected:
 
   void handleExecutionContextEnded() override {
     if (!requestedAllocations.empty()) {
-      cudaq::info("[DefaultExecutionManager] Flushing remaining {} allocations "
-                  "at handleExecutionContextEnded.",
-                  requestedAllocations.size());
+      CUDAQ_INFO("[DefaultExecutionManager] Flushing remaining {} allocations "
+                 "at handleExecutionContextEnded.",
+                 requestedAllocations.size());
       // If there are pending allocations, flush them to the simulator.
       // Making sure the simulator's state is consistent with the number of
       // allocations even though the circuit might be empty.
@@ -221,6 +221,29 @@ protected:
         })();
   }
 
+  void applyNoise(const kraus_channel &channel,
+                  const std::vector<QuditInfo> &targets) override {
+    if (isInTracerMode())
+      return;
+
+    flushGateQueue();
+
+    if (channel.empty())
+      if (!simulator()->isValidNoiseChannel(channel.noise_type))
+        throw std::runtime_error("this is not a valid kraus channel name (" +
+                                 channel.get_type_name() +
+                                 "), no "
+                                 "kraus ops available to construct it.");
+
+    std::vector<std::size_t> localT;
+    std::transform(targets.begin(), targets.end(), std::back_inserter(localT),
+                   [](auto &&el) { return el.id; });
+    CUDAQ_INFO(
+        "[DefaultExecutionManager] Applying fine-grain kraus channel {}.",
+        channel.get_type_name());
+    simulator()->applyNoise(channel, localT);
+  }
+
   int measureQudit(const cudaq::QuditInfo &q,
                    const std::string &registerName) override {
     flushRequestedAllocations();
@@ -240,8 +263,8 @@ protected:
 
 public:
   DefaultExecutionManager() {
-    cudaq::info("[DefaultExecutionManager] Creating the {} backend.",
-                simulator()->name());
+    CUDAQ_INFO("[DefaultExecutionManager] Creating the {} backend.",
+               simulator()->name());
   }
   virtual ~DefaultExecutionManager() = default;
 

@@ -1,5 +1,5 @@
 /********************************************************** -*- tablegen -*- ***
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -10,6 +10,22 @@
 #define CUDAQ_OPT_OPTIMIZER_TRANSFORMS_PASSES
 
 include "mlir/Pass/PassBase.td"
+
+def AddMeasurements : Pass<"add-measurements", "mlir::func::FuncOp"> {
+  let summary = "Add measurement operations.";
+  let description = [{
+    This pass adds measurement operations to the kernels that have no 
+    measurements.
+
+    This pass should be run in the sampling context, so as to comply with the 
+    spec - If no measurements appear in the kernel, then the `__global__` 
+    register is formed with implicit measurements being added for all the 
+    qubits defined in the kernel, and the measurements all occur at the end of 
+    the kernel.
+
+  }];
+  let dependentDialects = ["quake::QuakeDialect", "mlir::cf::ControlFlowDialect"];
+}
 
 def AddWireset : Pass<"add-wireset", "mlir::ModuleOp"> {
   let summary = "Adds a topology-less `quake.wire_set` to the module.";
@@ -57,15 +73,15 @@ def ApplySpecialization : Pass<"apply-op-specialization", "mlir::ModuleOp"> {
     purposes only.
   }];
 
-  let constructor = "cudaq::opt::createApplyOpSpecializationPass()";
-
   let options = [
-    Option<"computeActionOptimization", "compute-action-opt", "bool",
-      /*default=*/"true", "Enable the compute-action control optimization.">
+    Option<"computeActionOptimization", "compute-action", "bool",
+      /*default=*/"true", "Enable the compute-action control optimization.">,
+    Option<"constantPropagation", "constant-prop", "bool", /*default=*/"false",
+      "Enable specialization and constant propagation from apply call sites.">
   ];
 }
 
-def ArgumentSynthesis : Pass<"argument-synthesis", "mlir::func::FuncOp"> {
+def ArgumentSynthesis : Pass<"argument-synthesis", "mlir::ModuleOp"> {
   let summary = "Specialize a function by replacing arguments with constants";
   let description = [{
     This pass takes a list of functions and argument substitutions. For each
@@ -120,6 +136,15 @@ def BasisConversionPass : Pass<"basis-conversion", "mlir::ModuleOp"> {
     - `x(1)` means targeting pauli-x operations with one control (aka, `cx`)
     - `x(n)` means targeting pauli-x operation with unbounded number of controls
     - `x,x(1)` means targeting both `not` and `cx` operations
+
+    The pass automatically selects the set of rewrite patterns, ensuring every
+    gate is decomposed to the specified basis in a unique way. Option
+    `disable-patterns` can be used to filter the selected rewrite patterns.
+    Option `enable-patterns` can be used to override the automatic pattern
+    selection.
+
+    If no `basis` is specified or the pass cannot decompose all operations to
+    the specified basis, the pass application will fail.
   }];
   let options = [
     ListOption<"basis", "basis", "std::string", "Set of basis operations">,
@@ -141,9 +166,36 @@ def CheckKernelCalls : Pass<"check-kernel-calls", "mlir::func::FuncOp"> {
   }];
 }
 
+def ClassicalOptimization : Pass<"classical-optimization"> {
+  let summary = "Perform classical optimizations until a fix point is reached.";
+  let description = [{
+    Performs a number of classical optimizations greedily until a fix point
+    is reached:
+    - canonicalization
+    - simplify regions
+    - write-after-write-elimination
+    - lift-array-alloc
+    - cc-loop-normalize
+    - cc-loop-unroll
+  }];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::cf::ControlFlowDialect",
+                           "cudaq::cc::CCDialect"];
+
+  let options = [
+    Option<"threshold", "maximum-iterations", "unsigned", /*default=*/"50",
+      "Maximum iterations to unroll.">,
+    Option<"allowClosedInterval", "allow-closed-interval", "bool",
+      /*default=*/"true", "Allow loop iterations on a closed interval.">,
+    Option<"allowBreak", "allow-early-exit", "bool", /*default=*/"false",
+      "Allow unrolling of loop with early exit (i.e. break statement).">
+  ];
+}
+
 def CombineMeasurements :
     Pass<"combine-measurements", "mlir::func::FuncOp"> {
-  let summary = "Extends mesurements on subveqs adds output names";
+  let summary = "Extends measurements on subveqs adds output names";
   let description = [{
     Replace a pattern such as:
     ```
@@ -166,7 +218,6 @@ def CombineMeasurements :
   let dependentDialects = ["cudaq::cc::CCDialect", "quake::QuakeDialect"];
 }
 
-
 def CombineQuantumAllocations :
     Pass<"combine-quantum-alloc", "mlir::func::FuncOp"> {
   let summary = "Combines quake alloca operations.";
@@ -186,11 +237,11 @@ def CombineQuantumAllocations :
   let dependentDialects = ["cudaq::cc::CCDialect", "quake::QuakeDialect"];
 }
 
-def ConstPropComplex : Pass<"const-prop-complex", "mlir::func::FuncOp"> {
-  let summary = "Create and propagate complex constants.";
+def ConstantPropagation : Pass<"constant-propagation", "mlir::func::FuncOp"> {
+  let summary = "Propagate constants to their uses.";
   let description = [{
-    Rewrite the complex.CreateOp to complex.ConstantOp when possible.
-    Replace array pointer casts with element pointer casts.
+    This is a greedy pass that will push constants from single and
+    multidimensional array constants to their ultimate uses.
   }];
 }
 
@@ -204,9 +255,49 @@ def ConvertToDirectCalls : Pass<"indirect-to-direct-calls", "mlir::ModuleOp"> {
   }];
 }
 
+def ResourceCountPreprocess : Pass<"resource-count-preprocess", "mlir::func::FuncOp"> {
+  let summary = "Performs preprocessing to optimize for resource counter.";
+  let description = [{
+    This pass performs preprocessing to optimize the code for the resource counter
+    by removing as many invariant gates as possible during compilation, with the aim
+    of reducing the program size for further compilation, and speeding up resource
+    counting by the simulator at runtime.
+
+    For example, in the following program:
+
+    ```c++
+      cudaq::qarray<10> q;
+      h(q[0]);
+      for (size_t i = 0; i < 10; i++) {
+        y(q[i]);
+        if (mz(q[i]))
+          x(q[i]);
+      }
+    ```
+
+    The initial `h(q[0])` will always be run once, so we can pre count it and remove it.
+    Similarly, it is trivial to see that the loop will run 10 times, so we can pre count
+    `y(q[i])` ten times as well. However, because `x(q[i])` is gated by `mz(q[i])`, it is
+    not invariant, so it will remain and be counted during simulation.
+
+    Currently, the detection of "invariance" is purposefully dumb.
+
+    This preprocessing path may interfere with detecting downstream optimizations, as
+    preprocessed gates are counted and removed early in the pipeline.
+  }];
+
+  let options = [
+    Option<"countGate", "count-gate", "std::function<void(std::string,size_t,size_t)>",
+           /*default=*/"[](std::string str,size_t nControls, size_t count){}",
+           "Closure that will handle gate counts">,
+    Option<"dumpPreprocessed", "dump-preprocessed", "bool",
+           /*default=*/"false",
+           "Dump preprocessed gates instead of counting them (useful for testing)">,
+  ];
+}
+
 def DelayMeasurements : Pass<"delay-measurements", "mlir::func::FuncOp"> {
-  let summary =
-    "Move measurements as late as possible";
+  let summary = "Move measurements as late as possible";
 
   let description = [{
     Move measurements as late as possible. This is useful for a Base Profile
@@ -216,20 +307,49 @@ def DelayMeasurements : Pass<"delay-measurements", "mlir::func::FuncOp"> {
   let constructor = "cudaq::opt::createDelayMeasurementsPass()";
 }
 
+def DeadStoreRemoval : Pass<"dead-store-removal"> {
+  let summary = "Dead store removal (DSR).";
+  let description = [{
+    This pass performs classic dead store removal to clean up code that may
+    contain residual dead stores.
+  }];
+}
+
 def DecompositionPass: Pass<"decomposition", "mlir::ModuleOp"> {
   let summary = "Break down quantum operations.";
   let description = [{
-    This pass performs decomposition over a set of operations by iteratively
-    applying decomposition patterns until either a fixpoint is reached or the
-    maximum number of iterations/rewrites is exhausted. Decomposition is
-    best-effort and does not guarantee that the entire IR is decomposed after
-    running this pass.
+    This pass decomposes quantum operations by iteratively applying rewrite
+    patterns until all quantum operations are in basis, a fixpoint is reached or
+    the maximum number of iterations is exhausted.
+
+    When `basis` is specified, the pass automatically selects the set of rewrite
+    patterns, ensuring every gate is decomposed to the specified basis in a
+    unique way.
+    
+    ## Options
+
+    The following options are available and are all optional:
+
+    - `disable-patterns`: used to filter out specific rewrite patterns from the
+       selection.
+    - `enable-patterns`: when set, overrides the automatic pattern selection.
+    - `basis`: takes a comma-separated list of quantum operations with the
+      format: `<op-name>([<number-of-controls> | n])?`
+
+    If no `basis` is specified, as many patterns as possible are applied.
+
+    Examples of valid `basis` values:
+    - `x` — Pauli-X without controls (aka `not`)
+    - `x(1)` — Pauli-X with one control (aka `cx`)
+    - `x(n)` — Pauli-X with unbounded controls
+    - `x,x(1)` — Both `not` and `cx`
 
     NOTE: The current implementation is conservative w.r.t global phase, which
     means no decomposition will take place under the presence of controlled
     `quake.apply` operations in the module.
   }];
   let options = [
+    ListOption<"basis", "basis", "std::string", "Set of basis operations">,
     ListOption<"disabledPatterns", "disable-patterns", "std::string",
                "Labels of decomposition patterns that should be filtered out">,
     ListOption<"enabledPatterns", "enable-patterns", "std::string",
@@ -241,7 +361,8 @@ def DecompositionPass: Pass<"decomposition", "mlir::ModuleOp"> {
 }
 
 def DependencyAnalysis : Pass<"dep-analysis", "mlir::ModuleOp"> {
-  let summary = "Maps qubits and reorders operations based on dependency graph.";
+  let summary =
+    "Maps qubits and reorders operations based on dependency graph.";
   let description = [{
     A dependency graph is a Directed Acyclic Graph (DAG) where each node
     represents an operation, and each edge represents a "depends on" relation
@@ -283,11 +404,107 @@ def DependencyAnalysis : Pass<"dep-analysis", "mlir::ModuleOp"> {
   ];
 }
 
-def EraseNopCalls : Pass<"erase-nop-calls", "mlir::func::FuncOp"> {
+def DeleteStates : Pass<"delete-states", "mlir::ModuleOp"> {
+  let summary =
+    "Remove unnecessary creation of new states from data";
+  let description = [{
+    Argument synthesis for state pointers for remote simulation substitutes state
+    argument by a new state created from materialized data. The new state is not
+    always necessary, and is not deleted from the heap. This pass:
+
+    - Replaces state by its data if possible
+    - Adds delete calls before exits if not possible to replace a new state
+
+    For example, the new state is replaced by its data if only used in `quake.init_state`
+    instruction:
+
+    Before DeleteStates (delete-states):
+    ```
+    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+      %c8_i64 = arith.constant 8 : i64
+      %0 = cc.address_of @foo.rodata_synth_0 : !cc.ptr<!cc.array<complex<f32> x 8>>
+      %4 = quake.create_state %3, %c8_i64  : (!cc.ptr<!cc.array<complex<f32> x 8>>, i64) -> !cc.ptr<!quake.state>
+      %5 = quake.get_number_of_qubits %4 : (!cc.ptr<!quake.state>) -> i64
+      %6 = quake.alloca !quake.veq<?>[%5 : i64]
+      %7 = quake.init_state %6, %4 : (!quake.veq<?>, !cc.ptr<!quake.state>) -> !quake.veq<?>
+
+      return
+    }
+    ```
+
+    After DeleteStates (delete-states):
+    ```
+    module {
+    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+      %c8_i64 = arith.constant 8 : i64
+      %0 = cc.address_of @foo.rodata_synth_0 : !cc.ptr<!cc.array<complex<f32> x 8>>
+      %3 = quake.alloca !quake.veq<3>
+      %4 = quake.init_state %3, %0 : (!quake.veq<3>, !cc.ptr<!cc.array<complex<f32> x 4>>) -> !quake.veq<3>
+      return
+    }
+    ```
+
+    Otherwise, if state is used in another instructions and cannot be easily
+    replaced, the new state is deleted before exits:
+
+    Before DeleteStates (delete-states):
+    ```  func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+      ...
+      %4 = quake.create_state %3, %c8_i64  : (!cc.ptr<!cc.array<complex<f32> x 8>>, i64) -> !cc.ptr<!quake.state>
+      call @__nvqpp__mlirgen__sub_kernel(%4) : (!cc.ptr<!quake.state>) -> ()
+      return
+    }
+    ```
+
+    After DeleteStates (delete-states):
+    ```
+    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+      ...
+      %4 = quake.create_state %3, %c8_i64  : (!cc.ptr<!cc.array<complex<f32> x 8>>, i64) -> !cc.ptr<!quake.state>
+      call @__nvqpp__mlirgen__sub_kernel(%4) : (!cc.ptr<!quake.state>) -> ()
+      quake.delete_state %3 : !cc.ptr<!quake.state>
+      return
+    }
+    ```
+  }];
+}
+
+def DistributedDeviceCall : Pass<"distributed-device-call", "mlir::ModuleOp"> {
+  let summary = "Translate cc.device_call operations";
+
+  let description = [{
+    Perform the translation of cc.device_call to a set of substeps for a
+    distributed memory model.
+  }];
+
+  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
+def EraseNoise : Pass<"erase-noise"> {
+  let summary = "Erase the injection of noise via Kraus channels.";
+  let description = [{
+    Although CUDA-Q allows the user to specify the application of noise via
+    Kraus channels, these are not needed and must be removed if the code is to
+    run on quantum hardware, for example.
+  }];
+}
+
+def EraseNopCalls : Pass<"erase-nop-calls"> {
   let summary = "Erase calls to any builtin intrinsics that are NOPs.";
   let description = [{
     The code may contain marker function calls that do not generate any actual
     code. These calls are NOPs that will be erased by this pass.
+  }];
+}
+
+def EraseVectorCopyCtor : Pass<"erase-vector-copy-ctor"> {
+  let summary = "Erase unneeded vector copy ctor idiom after inlining.";
+  let description = [{
+    After inlining, we may be left with a peculiar idiom of the callee creating
+    a vector on the stack, copying that vector to a temporary on the heap, and
+    the calling function copying the heap data to a new vector on the stack.
+    Since the callee is inlined, none of this is really required. The callee and
+    caller share a common stack frame, so one copy is plenty.
   }];
 }
 
@@ -393,6 +610,13 @@ def GenerateKernelExecution : Pass<"kernel-execution", "mlir::ModuleOp"> {
                    be inlined by the JIT compiler, so this codegen kind does not
                    support any dynamic parameters.
     ```
+
+    The `generate-run-stack` option must be used whenever `cudaq::run` is being
+    used to launch kernels. This flag will enable the generation of a second
+    launch stack for entry-point kernels that duplicates the functionality of
+    the entry-point kernel's body while omitting its return value. While this
+    clearly changes the semantics of the kernel call, some transport layers
+    require that return values be dropped on the floor.
   }];
 
   let dependentDialects = ["cudaq::cc::CCDialect", "mlir::LLVM::LLVMDialect"];
@@ -403,11 +627,15 @@ def GenerateKernelExecution : Pass<"kernel-execution", "mlir::ModuleOp"> {
     Option<"startingArgIdx", "starting-arg-idx", "std::size_t", /*default=*/"0",
       "The starting argument index for the argsCreator.">,
     Option<"codegenKind", "codegen", "std::size_t", /*default=*/"0",
-      "Set the kind of code to generate for the launches.">
+      "Set the kind of code to generate for the launches.">,
+    Option<"genRunStack", "generate-run-stack", "bool", /*default=*/"false",
+      "Generate a cudaq::run stack for the entry-point kernels.">,
+    Option<"deferToJIT", "deferred", "bool", /*default=*/"false",
+      "Defer generating kernel execution until JIT time.">
   ];
 }
 
-def GetConcreteMatrix : Pass<"get-concrete-matrix", "mlir::func::FuncOp"> {
+def GetConcreteMatrix : Pass<"get-concrete-matrix", "mlir::ModuleOp"> {
   let summary =
     "Replace the unitary matrix generator function with a constant matrix.";
   let description = [{
@@ -457,12 +685,18 @@ def GlobalizeArrayValues : Pass<"globalize-array-values", "mlir::ModuleOp"> {
   let description = [{
     Often a `const_array` op can be canonicalized into scalar constants that
     are then constant propagated to their uses in the quake ops. When this
-    happens, the `const_array` may become unused and be eliminated.
+    happens, the `const_array` may become unused and can be eliminated.
 
     However, there can also be cases where the `const_array` remains alive, such
     as when it is used in a `state_init` op. In such cases, we may be able to go
     ahead and replace the `const_array` with a global constant. This pass makes
     such conversions.
+
+    A `const_array` may also be used as an image for a tree of spans which has
+    yet to be reified. In this case, the inner most array may be lowered to a
+    global object, but the tree of spans working outward from those objects
+    must be constructed. This pass can replace the reify_span operation with
+    smaller granularity operations that build these trees of spans.
   }];
 }
 
@@ -628,7 +862,7 @@ def LoopUnroll : Pass<"cc-loop-unroll"> {
   ];
 }
 
-def LowerToCFG : Pass<"lower-to-cfg", "mlir::func::FuncOp"> {
+def ConvertToCFG : Pass<"convert-to-cfg"> {
   let summary = "Erase CLoop, CIf, etc. ops, replacing them with a CFG.";
   let description = [{
     This pass converts high-level control flow ops to a more primitive basic
@@ -663,7 +897,13 @@ def LowerToCFG : Pass<"lower-to-cfg", "mlir::func::FuncOp"> {
   }];
 
   let dependentDialects = [ "mlir::cf::ControlFlowDialect" ];
-  let constructor = "cudaq::opt::createLowerToCFGPass()";
+}
+
+def ConvertToCFGPrep : Pass<"convert-to-cfg-prep", "mlir::ModuleOp"> {
+  let summary = "Prepare the Module to be converted to a CFG.";
+  let description = [{
+    This pass must be run before the ConvertToCFG pass.
+  }];
 }
 
 def MappingFunc: Pass<"qubit-mapping-func", "mlir::func::FuncOp"> {
@@ -685,10 +925,19 @@ def MappingFunc: Pass<"qubit-mapping-func", "mlir::func::FuncOp"> {
   }];
 
   let options = [
-    Option<"extendedLayerSize", "extendedLayerSize", "unsigned", /*default=*/"20", "Extended layer size">,
-    Option<"extendedLayerWeight", "extendedLayerWeight", "float", /*default=*/"0.5", "Extended layer weight">,
-    Option<"decayDelta", "decayDelta", "float", /*default=*/"0.5", "Decay delta">,
-    Option<"roundsDecayReset", "roundsDecayReset", "unsigned", /*default=*/"5", "Number of rounds before decay is reset">
+    Option<"device", "device", "std::string", /*default=*/"\"-\"",
+      "Device topology: path(N), ring(N), star(N), star(N,c), grid(w,h), file(/path/to/file), bypass">,
+    Option<"extendedLayerSize", "extendedLayerSize", "unsigned",
+           /*default=*/"20", "Extended layer size">,
+    Option<"extendedLayerWeight", "extendedLayerWeight", "float",
+           /*default=*/"0.5", "Extended layer weight">,
+    Option<"decayDelta", "decayDelta", "float", /*default=*/"0.5",
+           "Decay delta">,
+    Option<"roundsDecayReset", "roundsDecayReset", "unsigned", /*default=*/"5",
+           "Number of rounds before decay is reset">,
+    Option<"nonComposable", "raise-fatal-errors", "bool", /*default=*/"false",
+           "Run the pass in a non-composable way, which may cause immediate "
+           "internal compiler errors">
   ];
 }
 
@@ -701,10 +950,13 @@ def MappingPrep: Pass<"qubit-mapping-prep", "mlir::ModuleOp"> {
 
   let options = [
     Option<"device", "device", "std::string", /*default=*/"\"-\"",
-      "Device topology: path(N), ring(N), star(N), star(N,c), grid(w,h), file(/path/to/file), bypass">,
+      "Device topology: path(N), ring(N), star(N), star(N,c), grid(w,h), "
+      "file(/path/to/file), bypass">,
+    Option<"nonComposable", "raise-fatal-errors", "bool", /*default=*/"false",
+           "Run the pass in a non-composable way, which may cause immediate "
+           "internal compiler errors">
   ];
 }
-
 
 def MemToReg : Pass<"memtoreg", "mlir::func::FuncOp"> {
   let summary = "Converts memory-SSA to register-SSA form.";
@@ -759,69 +1011,269 @@ def ObserveAnsatz : Pass<"observe-ansatz", "mlir::func::FuncOp"> {
   ];
 }
 
-def DeleteStates : Pass<"delete-states", "mlir::ModuleOp"> {
-  let summary =
-    "Remove unnecessary creation of new states from data";
+def PhaseFolding: Pass<"phase-folding", "mlir::func::FuncOp"> {
+  let summary = "Perform phase based rotation merging.";
+
   let description = [{
-    Argument synthesis for state pointers for remote simulation substitutes state
-    argument by a new state created from materialized data. The new state is not
-    always necessary, and is not deleted from the heap. This pass:
+    Multiple `quake.rz` ops can be merged into a single gate if they occur
+    at the same phase. In a circuit with only Swap, NOT, CNOT, and Rz gates, a
+    phase represents the state of a qubit based on the Swap, NOT, and CNOT
+    operations applied to it.
 
-    - Replaces state by its data if possible
-    - Adds delete calls before exits if not possible to replace a new state
+    First, a preprocessing step identifies each subcircuit consisting only of
+    Swap, NOT, CNOT, and Rz gates. Currently, we restrict this subcircuit to
+    only working with `!quake.ref` types directly from `quake.alloca`s, as
+    values extraced from `quake.veq`s via `extract_ref` may have hidden side
+    effects that could cause the subcircuits to be incorrect.
 
-    For example, the new state is replaced by its data if only used in `quake.init_state`
-    instruction:
+    At the beginning of the subcircuit, each qubit is assigned a unique phase
+    variable. A phase is an exclusive sum of the phase variables determining
+    the current state of a qubit, calculated as follows. While walking the
+    subcircuit:
+    * A Swap gate swaps the phases for two qubits.
+    * A NOT gate inverts the phase for a qubit by (un)setting a flag.
+    * A CNOT gate sets the phase of the target to the exclusive sum of the
+      phase variables in the phases for the control and target qubits.
+    * If multiple `rz` ops are found at the same phase, they will be combined
+      by replacing the rotation angle of the latter occuring op to the sum of
+      the rotation angles of both ops, and removing the prior op.
+  }];
 
-    Before DeleteStates (delete-states):
+  let options = [
+    Option<"minimumBlockLength", "min-length", "unsigned", /*default=*/"20",
+    "Minimumn subcircuit length to run phase folding">,
+    Option<"minimumrzWeight", "min-rz-weight", "double", /*default=*/"20",
+    "Minimumn percentage of rz ops in subcircuit to run phase folding">,
+  ];
+
+  let dependentDialects = ["cudaq::cc::CCDialect", "quake::QuakeDialect"];
+}
+
+def PromoteRefToVeqAlloc : Pass<"promote-qubit-allocation"> {
+  let summary = "Promote single qubit allocations.";
+  let description = [{
+    This pass converts all single qubit allocations in the quake dialect to
+    allocations of vectors of qubits of length one. This conversion makes all
+    allocations uniform for the conversion to QIR.
+  }];
+}
+
+def PruneCtrlRelations : Pass<"pruned-ctrl-form", "mlir::func::FuncOp"> {
+  let summary = "Removes artifical control constraints between quantum ops.";
+  let description = [{
+    In the value semantics, quantum gates may be overly constrained in terms of
+    control qubits. These constraints can be removed within the IR to get a more
+    accurate representation of the dataflow of the *logical* qubits. This
+    alternative representation may be better suited to certain transformations.
+
+    The following example is overly constrained. The control wire, beginning
+    with `%0` is imposing what appears to be a strict ordering of
+    `[x -> h -> y]`.
+    ```mlir
+      %3:2 = x [%0] %1 : (!wire, !wire) -> (!wire, !wire)
+      %4:2 = h [%3#0] %2 : (!wire, !wire) -> (!wire, !wire)
+      %5:2 = y [%4#0] %3#1 : (!wire, !wire) -> (!wire, !wire)
     ```
-    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
-      %c8_i64 = arith.constant 8 : i64
-      %0 = cc.address_of @foo.rodata_synth_0 : !cc.ptr<!cc.array<complex<f32> x 8>>
-      %3 = cc.cast %0 : (!cc.ptr<!cc.array<complex<f32> x 8>>) -> !cc.ptr<i8>
-      %4 = call @__nvqpp_cudaq_state_createFromData_fp32(%3, %c8_i64) : (!cc.ptr<i8>, i64) -> !cc.ptr<!cc.state>
-      %5 = call @__nvqpp_cudaq_state_numberOfQubits(%4) : (!cc.ptr<!cc.state>) -> i64
-      %6 = quake.alloca !quake.veq<?>[%5 : i64]
-      %7 = quake.init_state %6, %4 : (!quake.veq<?>, !cc.ptr<!cc.state>) -> !quake.veq<?>
 
+    This snippet can be rewritten as the following IR to reflect that the
+    control wire has an identity applied so is unchanged. We observe less strict
+    ordering constraints of `[h | x -> y]`. This might allow a scheduling pass
+    to swap the order of the `h` and `x` gates, for instance.
+    ```mlir
+      %ctrl = to_ctrl %old.0 : (!wire) -> !control
+      %3 = x [%ctrl] %1 : (!control, !wire) -> !wire
+      %4 = h [%ctrl] %2 : (!control, !wire) -> !wire
+      %5 = y [%ctrl] %3 : (!control, !wire) -> !wire
+      %new.0 = from_ctrl %ctrl : (!control) -> !wire
+    ```
+  }];
+}
+
+def PySynthCallableBlockArgs :
+    Pass<"py-synth-callable-block-args", "mlir::func::FuncOp"> {
+  let summary =
+    "Synthesize / Inline cc.callable_func on function block arguments.";
+  let description = [{
+    This pass is leveraged by the Python bindings to synthesize any 
+    cc.callable block arguments. By synthesis we mean replace all uses of the 
+    callable block argument with a specific in-Module function call (func.call) 
+    retrieved at runtime (the name of the function passed to the kernel at the 
+    cc.callable block argument index).
+  }];
+}
+
+def QuakeSynthesize : Pass<"quake-synth", "mlir::ModuleOp"> {
+  let summary =
+    "Synthesize concrete quantum program from Quake code plus runtime values.";
+  let description = [{
+    Convert Quake representing a dynamic quantum kernel to Quake
+    representing a concrete quantum program instance using known
+     runtime values.
+  }];
+
+  let constructor = "cudaq::opt::createQuakeSynthesizer()";
+}
+
+def QuakeAddDeallocs : Pass<"add-dealloc", "mlir::func::FuncOp"> {
+  let summary = "Add quake deallocs to functions before they return.";
+  let description = [{
+    This pass ensures that a dealloc is inserted before functions return
+    if the function contains a AllocaOp. It should be run before converting
+    to QIR, for example, in order to generate correct code.
+  }];
+
+  let constructor = "cudaq::opt::createQuakeAddDeallocs()";
+}
+
+def QuakeAddMetadata : Pass<"quake-add-metadata", "mlir::func::FuncOp"> {
+  let summary = "Add various metadata attributes to a Quake function.";
+  let description = [{
+   This pass provides a hook for adding various metadata to a Quake
+   function's list of compile-time attributes. This type of metadata
+   exposure will enable quantum IR introspection in the CUDA-Q
+   runtime library.
+  }];
+
+  let constructor = "cudaq::opt::createQuakeAddMetadata()";
+}
+
+def QuakePropagateMetadata : Pass<"quake-propagate-metadata", "mlir::ModuleOp"> {
+  let summary = "Propagate metadata from callees to callers when needed.";
+  let description = [{
+   This pass propagates function metadata attributes added by `quake-add-metadata`
+   pass, such as `qubitMeasurementFeedback`, to all the callers of the function.
+   This makes sure the attributes are not missing after inlining.
+  }];
+}
+
+def QuakeSimplify : Pass<"quake-simplify"> {
+  let summary = "Perform simplifications on the quake ops.";
+  let description = [{
+    This pass performs several simplifications on quake operations. The
+    IR is expected to be in value-semantics form.
+  }];
+}
+
+def RegToMem : Pass<"regtomem", "mlir::func::FuncOp"> {
+  let summary = "Converts register-SSA to memory-SSA form.";
+  let description = [{
+    Perform the reverse transformation of the memtoreg pass.
+
+    This pass converts values of type `!quake.wire` to be wrapped as references
+    where possible. This is an greedy/exhaustive transformation in that wires
+    will be removed from the Quake IR wherever possible. There may be cases
+    where the wire cannot be wrapped uniquely. In those cases, this
+    transformation will take no action and leave the IR (partially) with wire
+    type values.
+  }];
+  let dependentDialects = ["cudaq::cc::CCDialect", "quake::QuakeDialect"];
+}
+
+def ReplaceStateWithKernel : Pass<"replace-state-with-kernel", "mlir::func::FuncOp"> {
+  let summary =
+    "Replace `quake.init_state` instructions with call to the kernel generating the state";
+  let description = [{
+    This optimization replaces `quake.init_state`, `quake.get_number_of_qubits`,
+    and `quake.materialize_state` operations invoked on state pointers during
+    argument synthesis for quantum devices.
+
+    Before this optimization, argument synthesis for state pointers for quantum
+    devices substituted a state created from the `quake.materialize_state`
+    operation for the state argument.
+
+    The `quake.materialize_state` operation accepts symbols for the synthesized
+    kernels `@num_qubits` and `@init` that argument synthesis generated from
+    the original kernel call that generated the state, e.g.,
+    the `cudaq::get_state` call that refers to the result of a specific quantum
+    kernel being invoked with a set of parameters
+
+    For example, for the user code:
+      ```
+      state = cudaq::get_state(callee, args)
+      caller(state)
+      ```
+
+    The argument synthesis generated the following new kernels from the `callee`
+    and synthesized them to substitute their arguments with `args`:
+      ```
+      func.func @callee_num_qubits(arguments) -> i64
+      func.func @callee_init(qubits: !quake.veq<?>, arguments) -> !quake.veq<?>
+      ```
+
+    The argument synthesis also substituted the state argument in the `caller`
+    with:
+      ```
+      quake.materialize_state @callee_num_qubits @callee_init: !cc.ptr<!quake.state>
+      ```
+
+    This optimization performs the replacements for the the following operations 
+    that use a state produced by  `quake.materialize_state @num_qubits, @init`
+    operation:
+
+    - Replace `quake.get_number_of_qubits` operation by call to `@num_qubits`
+    - Replace `quake.init_state` operation by call to `@init`
+    - Clean up unused `quake.materialize_state` operation
+
+    For example:
+
+    Before ReplaceStateWithKernel (replace-state-with-kernel):
+    ```
+    func.func @foo() {
+      %0 = quake.materialize_state @callee.num_qubits_0, @callee.init_0: !cc.ptr<!quake.state>
+      %1 = quake.get_number_of_qubits %0 : (!cc.ptr<!quake.state>) -> i64
+      %2 = quake.alloca !quake.veq<?>[%1 : i64]
+      %3 = quake.init_state %2, %0 : (!quake.veq<?>, !cc.ptr<!quake.state>) -> !quake.veq<?>
       return
     }
     ```
 
-    After DeleteStates (delete-states):
+    After ReplaceStateWithKernel (replace-state-with-kernel):
     ```
-    module {
-    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
-      %c8_i64 = arith.constant 8 : i64
-      %0 = cc.address_of @foo.rodata_synth_0 : !cc.ptr<!cc.array<complex<f32> x 8>>
-      %3 = quake.alloca !quake.veq<3>
-      %4 = quake.init_state %3, %0 : (!quake.veq<3>, !cc.ptr<!cc.array<complex<f32> x 4>>) -> !quake.veq<3>
+    func.func @foo()  {
+      %1 = call @callee.num_qubits_0() : () -> i64
+      %2 = quake.alloca !quake.veq<?>[%1 : i64]
+      %3 = call @callee.init_0(%2) : (!quake.veq<?>) -> !quake.veq<?>
       return
     }
     ```
+  }];
+}
 
-    Otherwise, if state is used in another instructions and cannot be easily
-    replaced, the new state is deleted before exits:
+def SROA : Pass<"cc-sroa"> {
+  let summary = "Scalar replacement of aggregates.";
+  let description = [{
+    Simple scalar replacement of aggregates. This pass will rewrite simple use
+    cases by replacing aggregates with scalars.
 
-    Before DeleteStates (delete-states):
-    ```  func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
-      ...
-      %4 = call @__nvqpp_cudaq_state_createFromData_fp32(%3, %c8_i64) : (!cc.ptr<i8>, i64) -> !cc.ptr<!cc.state>
-      call @__nvqpp__mlirgen__sub_kernel(%4) : (!cc.ptr<!cc.state>) -> ()
-      return
-    }
-    ```
+    To be implemented: handling recursive compositions of aggregate types.
+  }];
+  let dependentDialects = ["cudaq::cc::CCDialect"];
+}
 
-    After DeleteStates (delete-states):
+def StackFramePrealloc : Pass<"stack-frame-prealloc", "mlir::func::FuncOp"> {
+  let summary = "Stack frame preallocation.";
+  let description = [{
+    This pass is intended to be run on the CFG (low-level semantics) level.
+
+    Stack slots may end up being allocated across the body of a function. It
+    is generally beneficial however to collect them in the function preamble
+    (or entry block).
+
+    This pass is similar to variable coalescing, which can merge allocations
+    based on their scopes, but works at a lower semantic level of the IR. This
+    pass aims to optimize patterns such as
+    ```mlir
+      %10 = call @llvm.stacksave()
+      %24 = cc.alloca !T
+      call @llvm.stackrestore(%10)
     ```
-    func.func @foo() attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
-      ...
-      %4 = call @__nvqpp_cudaq_state_createFromData_fp32(%3, %c8_i64) : (!cc.ptr<i8>, i64) -> !cc.ptr<!cc.state>
-      call @__nvqpp__mlirgen__sub_kernel(%4) : (!cc.ptr<!cc.state>) -> ()
-      call @__nvqpp_cudaq_state_delete(%4) : (!cc.ptr<!cc.state>) -> ()
-      return
-    }
-    ```
+    such that the allocation, %24, is moved to the entry block and the two
+    stack guards, if they guard no allocations, can be correctly removed.
+
+    Not all allocations can be moved in this way, which implies that not all
+    stack guards can be safely removed.  Transport layer conformity tools may
+    unsafely remove operations, but the compiler should never do so, as it
+    would mean the compiler is generating incorrect code.
   }];
 }
 
@@ -872,108 +1324,6 @@ def StatePreparation : Pass<"state-prep", "mlir::func::FuncOp"> {
     Option<"phaseThreshold", "threshold", "double",
       /*default=*/"1e-10", "Threshold to trigger phase equalization">,
   ];
-}
-
-def PromoteRefToVeqAlloc : Pass<"promote-qubit-allocation"> {
-  let summary = "Promote single qubit allocations.";
-  let description = [{
-    This pass converts all single qubit allocations in the quake dialect to
-    allocations of vectors of qubits of length one. This conversion makes all
-    allocations uniform for the conversion to QIR.
-  }];
-}
-
-def PruneCtrlRelations : Pass<"pruned-ctrl-form", "mlir::func::FuncOp"> {
-  let summary = "Removes artifical control constraints between quantum ops.";
-  let description = [{
-    In the value semantics, quantum gates may be overly constrained in terms of
-    control qubits. These constraints can be removed within the IR to get a more
-    accurate representation of the dataflow of the *logical* qubits. This
-    alternative representation may be better suited to certain transformations.
-
-    The following example is overly constrained. The control wire, beginning
-    with `%0` is imposing what appears to be a strict ordering of
-    `[x -> h -> y]`.
-    ```mlir
-      %3:2 = x [%0] %1 : (!wire, !wire) -> (!wire, !wire)
-      %4:2 = h [%3#0] %2 : (!wire, !wire) -> (!wire, !wire)
-      %5:2 = y [%4#0] %3#1 : (!wire, !wire) -> (!wire, !wire)
-    ```
-
-    This snippet can be rewritten as the following IR to reflect that the
-    control wire has an identity applied so is unchanged. We observe less strict
-    ordering constraints of `[h | x -> y]`. This might allow a scheduling pass
-    to swap the order of the `h` and `x` gates, for instance.
-    ```mlir
-      %ctrl = to_ctrl %old.0 : (!wire) -> !control
-      %3 = x [%ctrl] %1 : (!control, !wire) -> !wire
-      %4 = h [%ctrl] %2 : (!control, !wire) -> !wire
-      %5 = y [%ctrl] %3 : (!control, !wire) -> !wire
-      %new.0 = from_ctrl %ctrl : (!control) -> !wire
-    ```
-  }];
-}
-
-def PySynthCallableBlockArgs :
-    Pass<"py-synth-callable-block-args", "mlir::func::FuncOp"> {
-  let summary = "Synthesize / Inline cc.callable_func on function block arguments.";
-  let description = [{
-    This pass is leveraged by the Python bindings to synthesize any 
-    cc.callable block arguments. By synthesis we mean replace all uses of the 
-    callable block argument with a specific in-Module function call (func.call) 
-    retrieved at runtime (the name of the function passed to the kernel at the 
-    cc.callable block argument index).
-  }];
-}
-
-def QuakeSynthesize : Pass<"quake-synth", "mlir::ModuleOp"> {
-  let summary =
-    "Synthesize concrete quantum program from Quake code plus runtime values.";
-  let description = [{
-    Convert Quake representing a dynamic quantum kernel to Quake
-    representing a concrete quantum program instance using known
-     runtime values.
-  }];
-
-  let constructor = "cudaq::opt::createQuakeSynthesizer()";
-}
-
-def QuakeAddDeallocs : Pass<"add-dealloc", "mlir::func::FuncOp"> {
- let summary = "Add quake deallocs to functions before they return.";
-  let description = [{
-    This pass ensures that a dealloc is inserted before functions return
-    if the function contains a AllocaOp. It should be run before converting
-    to QIR, for example, in order to generate correct code.
-  }];
-
-  let constructor = "cudaq::opt::createQuakeAddDeallocs()";
-}
-
-def QuakeAddMetadata : Pass<"quake-add-metadata", "mlir::func::FuncOp"> {
- let summary = "Add various metadata attributes to a Quake function.";
-  let description = [{
-   This pass provides a hook for adding various metadata to a Quake
-   function's list of compile-time attributes. This type of metadata
-   exposure will enable quantum IR introspection in the CUDA-Q
-   runtime library.
-  }];
-
-  let constructor = "cudaq::opt::createQuakeAddMetadata()";
-}
-
-def RegToMem : Pass<"regtomem", "mlir::func::FuncOp"> {
-  let summary = "Converts register-SSA to memory-SSA form.";
-  let description = [{
-    Perform the reverse transformation of the memtoreg pass.
-
-    This pass converts values of type `!quake.wire` to be wrapped as references
-    where possible. This is an greedy/exhaustive transformation in that wires
-    will be removed from the Quake IR wherever possible. There may be cases
-    where the wire cannot be wrapped uniquely. In those cases, this
-    transformation will take no action and leave the IR (partially) with wire
-    type values.
-  }];
-  let dependentDialects = ["cudaq::cc::CCDialect", "quake::QuakeDialect"];
 }
 
 // UnitarySynthesis is a module pass because it may modify the `ModuleOp` by
@@ -1028,7 +1378,6 @@ def UnwindLowering : Pass<"unwind-lowering", "mlir::func::FuncOp"> {
     The lower to CFG pass removed all structured operations from a function,
     lowering the body of the function completely to a primitive CFG.
   }];
-  let constructor = "cudaq::opt::createUnwindLoweringPass()";
 }
 
 def UpdateRegisterNames : Pass<"update-register-names"> {
@@ -1037,6 +1386,57 @@ def UpdateRegisterNames : Pass<"update-register-names"> {
     After loop unrolling, there may be duplicate registerName attributes. Run
     this pass to give them unique attribute values.
   }];
+}
+
+def VariableCoalesce : Pass<"variable-coalesce", "mlir::func::FuncOp"> {
+  let summary = "Coalesce variables in functions.";
+  let description = [{
+    This pass will move temporaries from inner scopes to the outermost,
+    function scope, and coalesce variables of the same type and disjoint
+    live-ranges. It relies on the correct and proper construction and use of
+    `cc.scope` ops.
+  }];
+
+  let options = [
+    Option<"hoistOnly", "hoist-only", "bool", /*default=*/"false",
+      "Hoist the variables only.">
+  ];
+}
+
+def WriteAfterWriteElimination : Pass<"write-after-write-elimination"> {
+  let summary = "Remove stores that are overridden by subsequent store";
+  let description = [{
+    Remove stores to a location on the stack that have a subsequent store
+    to the same location without a use between them:
+
+    Example:
+    ```mlir
+    %1 = cc.alloca !cc.array<i64 x 1>
+    %2 = cc.cast %1 : (!cc.ptr<!cc.array<i64 x 1>>) -> !cc.ptr<i64>
+    cc.store %c0_i64, %2 : !cc.ptr<i64>
+    // nothing using %2 until the next instruction
+    cc.store %c1_i64, %2 : !cc.ptr<i64>
+    ```
+
+    would be converted to
+
+    ```mlir
+    %1 = cc.alloca !cc.array<i64 x 1>
+    %2 = cc.cast %1 : (!cc.ptr<!cc.array<i64 x 1>>) -> !cc.ptr<i64>
+    cc.store %c1_i64, %2 : !cc.ptr<i64>
+    ```
+  }];
+}
+
+def QubitResetBeforeReuse : Pass<"qubit-reset-before-reuse", "mlir::func::FuncOp"> {
+  let summary = "Add qubit reset and conditional initialization after measurement if qubit is to be reused.";
+  let description = [{
+   This pass adds qubit reset and conditionally applies an X gate if the measurement result is 1 
+   to initialize qubit into the correct state after measurement. This is only activated when the measured qubit
+   is to be reused.
+   Note: if the measurement is already accompanied by a reset, we won't add any extra reset.
+  }];
+
 }
 
 #endif // CUDAQ_OPT_OPTIMIZER_TRANSFORMS_PASSES

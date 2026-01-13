@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -16,9 +16,10 @@
 #ifndef CUDAQ_BACKEND_STIM
 CUDAQ_TEST(BuilderTester, checkSimple) {
   {
-    using namespace cudaq::spin;
-    cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                       .21829 * z(0) - 6.125 * z(1);
+    cudaq::spin_op h =
+        5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+        2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+        .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
 
     auto [ansatz, theta] = cudaq::make_kernel<double>();
 
@@ -41,11 +42,13 @@ CUDAQ_TEST(BuilderTester, checkSimple) {
   {
     // Build up a 2 parameter circuit using a vector<double> parameter
     // Run the cudaq optimizer to find optimal value.
-    using namespace cudaq::spin;
-    cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                       .21829 * z(0) - 6.125 * z(1);
-    cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
-                        3.913119 * y(1) * y(2);
+    cudaq::spin_op h =
+        5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+        2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+        .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
+    cudaq::spin_op h3 = h + 9.625 - 9.625 * cudaq::spin_op::z(2) -
+                        3.913119 * cudaq::spin_op::x(1) * cudaq::spin_op::x(2) -
+                        3.913119 * cudaq::spin_op::y(1) * cudaq::spin_op::y(2);
 
     auto [ansatz, theta, phi] = cudaq::make_kernel<double, double>();
 
@@ -77,11 +80,13 @@ CUDAQ_TEST(BuilderTester, checkSimple) {
   {
     // Build up a 2 parameter circuit using a vector<double> parameter
     // Run the cudaq optimizer to find optimal value.
-    using namespace cudaq::spin;
-    cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                       .21829 * z(0) - 6.125 * z(1);
-    cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
-                        3.913119 * y(1) * y(2);
+    cudaq::spin_op h =
+        5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) -
+        2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+        .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
+    cudaq::spin_op h3 = h + 9.625 - 9.625 * cudaq::spin_op::z(2) -
+                        3.913119 * cudaq::spin_op::x(1) * cudaq::spin_op::x(2) -
+                        3.913119 * cudaq::spin_op::y(1) * cudaq::spin_op::y(2);
 
     auto [ansatz, thetas] = cudaq::make_kernel<std::vector<double>>();
 
@@ -425,7 +430,83 @@ CUDAQ_TEST(BuilderTester, checkRotations) {
     EXPECT_EQ(counts.count("0111"), 1000);
   }
 }
-#endif
+#ifndef CUDAQ_BACKEND_DM
+CUDAQ_TEST(BuilderTester, checkU3) {
+  cudaq::set_random_seed(13);
+
+  // Simple U3 gate.
+  {
+    auto kernel = cudaq::make_kernel();
+    auto target = kernel.qalloc();
+    kernel.u3(M_PI_2, 0, M_PI, target);
+    auto counts = cudaq::sample(kernel);
+    EXPECT_EQ(counts.size(), 2);
+    std::size_t counter = 0;
+    for (auto &[k, v] : counts) {
+      counter += v;
+      EXPECT_TRUE(k == "0" || k == "1");
+    }
+    EXPECT_EQ(counter, 1000);
+    auto state = cudaq::get_state(kernel);
+    EXPECT_NEAR(M_SQRT1_2, state[0].real(), 1e-3);
+    EXPECT_NEAR(M_SQRT1_2, state[1].real(), 1e-3);
+  }
+
+  // Check controlled-U3 gate.
+  {
+    auto kernel = cudaq::make_kernel();
+    auto qubits = kernel.qalloc(2);
+    // Prepare control qubit in the 1-state.
+    kernel.x(qubits[0]);
+    // Apply controlled-U3 gate.
+    kernel.u3<cudaq::ctrl>(M_PI_2, 0.0, M_PI, qubits[0], qubits[1]);
+    auto counts = cudaq::sample(kernel);
+    EXPECT_EQ(counts.size(), 2);
+    std::size_t counter = 0;
+    for (auto &[k, v] : counts) {
+      counter += v;
+      EXPECT_TRUE(k == "10" || k == "11");
+    }
+    EXPECT_EQ(counter, 1000);
+  }
+  // Check controlled-U3 gate with a vector of controls.
+  {
+    auto kernel = cudaq::make_kernel();
+    auto target = kernel.qalloc();
+    auto ctrl1 = kernel.qalloc();
+    auto ctrl2 = kernel.qalloc();
+    auto ctrl3 = kernel.qalloc();
+    // Prepare control qubits in the 1-state.
+    kernel.x(ctrl1);
+    kernel.x(ctrl2);
+    kernel.x(ctrl3);
+    // Create a vector of controls.
+    std::vector<cudaq::QuakeValue> controls{ctrl1, ctrl2, ctrl3};
+    kernel.u3<cudaq::ctrl>(M_PI_2, 0, M_PI, controls, target);
+    auto counts = cudaq::sample(kernel);
+    EXPECT_EQ(counts.size(), 2);
+    std::size_t counter = 0;
+    for (auto &[k, v] : counts) {
+      counter += v;
+      EXPECT_TRUE(k == "0111" || k == "1111");
+    }
+    EXPECT_EQ(counter, 1000);
+  }
+  // Check adjoint U3 gate.
+  {
+    auto kernel = cudaq::make_kernel();
+    auto target = kernel.qalloc();
+    kernel.u3(M_PI, -M_PI_2, M_PI_2, target);
+    auto counts = cudaq::sample(kernel);
+    EXPECT_EQ(counts.count("1"), 1000);
+    // Apply adjoint U3 gate.
+    kernel.u3<cudaq::adj>(M_PI, -M_PI_2, M_PI_2, target);
+    auto counts_adj = cudaq::sample(kernel);
+    EXPECT_EQ(counts_adj.count("0"), 1000);
+  }
+}
+#endif // CUDAQ_BACKEND_DM
+#endif // CUDAQ_BACKEND_STIM
 
 CUDAQ_TEST(BuilderTester, checkSwap) {
   cudaq::set_random_seed(13);
@@ -769,6 +850,30 @@ CUDAQ_TEST(BuilderTester, checkKernelControl) {
 #endif
 
 #ifndef CUDAQ_BACKEND_STIM
+CUDAQ_TEST(BuilderTester, checkKernelControlOnMultipleQubits) {
+  auto [x_kernel, t] = cudaq::make_kernel<cudaq::qubit>();
+  x_kernel.x(t);
+
+  auto kernel = cudaq::make_kernel();
+  auto controls = kernel.qalloc(2);
+  auto target = kernel.qalloc();
+
+  // |11> controls, |0> target
+  kernel.x(controls);
+
+  kernel.control(x_kernel, controls, target);
+  kernel.mz(controls);
+  kernel.mz(target);
+
+  auto counts = cudaq::sample(kernel);
+  counts.dump();
+
+  EXPECT_EQ(counts.size(), 1);
+  EXPECT_TRUE(counts.begin()->first == "111");
+}
+#endif
+
+#ifndef CUDAQ_BACKEND_STIM
 CUDAQ_TEST(BuilderTester, checkAdjointOp) {
   auto kernel = cudaq::make_kernel();
   auto q = kernel.qalloc();
@@ -1060,7 +1165,7 @@ CUDAQ_TEST(BuilderTester, checkEntryPointAttribute) {
   std::cout << quake;
 
   std::regex functionDecleration(
-      R"(func\.func @__nvqpp__mlirgen\w+\(\) attributes \{"cudaq-entrypoint"\})");
+      R"(func\.func @__nvqpp__mlirgen\w+\(\) attributes \{"cudaq-entrypoint")");
   EXPECT_TRUE(std::regex_search(quake, functionDecleration));
 }
 
@@ -1075,7 +1180,22 @@ CUDAQ_TEST(BuilderTester, checkExpPauli) {
       0, 2, 0, 2, 0.1202,     0,  2, 0, 0, 2, 0.165607,   0,
       0, 2, 2, 0, 0.165607,   0,  0, 0, 2, 2, 0.174073,   0,
       1, 1, 3, 3, -0.0454063, -0, 15};
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#if (defined(__GNUC__) && !defined(__clang__) && !defined(__INTEL_COMPILER))
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
   cudaq::spin_op h(h2_data, 4);
+#if (defined(__GNUC__) && !defined(__clang__) && !defined(__INTEL_COMPILER))
+#pragma GCC diagnostic pop
+#endif
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
   {
     auto [kernel, theta] = cudaq::make_kernel<double>();
     auto qubits = kernel.qalloc(4);
@@ -1492,4 +1612,44 @@ CUDAQ_TEST(BuilderTester, checkMidCircuitMeasureWithReset) {
     if (countsFinal[k] != countsMidCircuit[k])
       match = false;
   EXPECT_EQ(match, false);
+}
+
+CUDAQ_TEST(BuilderTester, checkExplicitMeasurements) {
+  int n_qubits = 4;
+  int n_rounds = 10;
+  auto explicit_kernel = cudaq::make_kernel();
+  auto q = explicit_kernel.qalloc(n_qubits);
+  for (int round = 0; round < n_rounds; round++) {
+    explicit_kernel.h(q[0]);
+    for (int i = 1; i < n_qubits; i++)
+      explicit_kernel.x<cudaq::ctrl>(q[i - 1], q[i]);
+    explicit_kernel.mz(q);
+    for (int i = 0; i < n_qubits; i++)
+      explicit_kernel.reset(q[i]);
+  }
+
+  std::size_t num_shots = 50;
+  cudaq::sample_options options{.shots = num_shots,
+                                .explicit_measurements = true};
+  auto counts = cudaq::sample(options, explicit_kernel);
+  // counts.dump();
+
+  // With many shots of multiple rounds, we need to see different shot
+  // measurements.
+  EXPECT_GT(counts.to_map().size(), 1);
+
+  // Check some lengths
+  auto seq = counts.sequential_data();
+  EXPECT_EQ(seq.size(), num_shots);
+  EXPECT_EQ(seq[0].size(), n_qubits * n_rounds);
+
+  // Check that all rounds are in the bell state (all 0's or all 1's)
+  for (auto &[k, v] : counts.to_map()) {
+    for (int r = 0; r < n_rounds; r++) {
+      std::string oneRound(k.begin() + r * n_qubits,
+                           k.begin() + (r + 1) * n_qubits);
+      EXPECT_TRUE(oneRound == std::string(n_qubits, '0') ||
+                  oneRound == std::string(n_qubits, '1'));
+    }
+  }
 }

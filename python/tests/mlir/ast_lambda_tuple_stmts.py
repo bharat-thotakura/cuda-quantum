@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -24,7 +24,7 @@ def test_control_kernel():
 
 
 # CHECK-LABEL:   func.func @__nvqpp__mlirgen__reflect(
-# CHECK-SAME:                                         %[[VAL_0:.*]]: !quake.veq<?>) {
+# CHECK-SAME:                 %[[VAL_0:.*]]: !quake.veq<?>)
 # CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 2 : i64
 # CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : i64
 # CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 1 : i64
@@ -46,7 +46,7 @@ def test_control_kernel():
 # CHECK:             ^bb0(%[[VAL_15:.*]]: i64):
 # CHECK:               %[[VAL_16:.*]] = arith.addi %[[VAL_15]], %[[VAL_3]] : i64
 # CHECK:               cc.continue %[[VAL_16]] : i64
-# CHECK:             } {invariant}
+# CHECK:             }
 # CHECK:             %[[VAL_17:.*]] = cc.loop while ((%[[VAL_18:.*]] = %[[VAL_2]]) -> (i64)) {
 # CHECK:               %[[VAL_19:.*]] = arith.cmpi slt, %[[VAL_18]], %[[VAL_4]] : i64
 # CHECK:               cc.condition %[[VAL_19]](%[[VAL_18]] : i64)
@@ -59,7 +59,7 @@ def test_control_kernel():
 # CHECK:             ^bb0(%[[VAL_22:.*]]: i64):
 # CHECK:               %[[VAL_23:.*]] = arith.addi %[[VAL_22]], %[[VAL_3]] : i64
 # CHECK:               cc.continue %[[VAL_23]] : i64
-# CHECK:             } {invariant}
+# CHECK:             }
 # CHECK:           } : !cc.callable<() -> ()>
 # CHECK:           %[[VAL_24:.*]] = cc.create_lambda {
 # CHECK:             quake.z {{\[}}%[[VAL_6]]] %[[VAL_8]] : (!quake.veq<?>, !quake.ref) -> ()

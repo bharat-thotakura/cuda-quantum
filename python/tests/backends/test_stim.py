@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -16,10 +16,9 @@ import numpy as np
 
 @pytest.fixture(scope="session", autouse=True)
 def setTarget():
-    old_target = cudaq.get_target()
     cudaq.set_target('stim')
     yield
-    cudaq.set_target(old_target)
+    cudaq.reset_target()
 
 
 def test_stim_non_clifford():
@@ -32,6 +31,7 @@ def test_stim_non_clifford():
     with pytest.raises(RuntimeError) as e:
         # Cannot perform non-Clifford gates in Stim simulator
         cudaq.sample(kernel)
+    assert 'Gate not supported by Stim simulator' in repr(e)
 
 
 def test_stim_toffoli_gates():
@@ -44,6 +44,7 @@ def test_stim_toffoli_gates():
     with pytest.raises(RuntimeError) as e:
         # Cannot perform Toffoli gates in Stim simulator
         cudaq.sample(kernel)
+    assert 'Gates with >1 controls not supported by Stim simulator' in repr(e)
 
 
 def test_stim_sample():
@@ -61,6 +62,19 @@ def test_stim_sample():
     assert (len(counts) == 2)
     assert ('0' * 250 in counts)
     assert ('1' * 250 in counts)
+
+
+def test_stim_all_mz_types():
+    # Create the kernel we'd like to execute on Stim
+    @cudaq.kernel
+    def kernel():
+        qubits = cudaq.qvector(10)
+        mx(qubits)
+        my(qubits)
+        mz(qubits)
+
+    counts = cudaq.sample(kernel)
+    assert (len(counts) > 1)
 
 
 def test_stim_state_preparation():

@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -24,12 +24,12 @@ template <typename QuantumKernel, typename... Args,
               std::is_invocable_v<QuantumKernel, std::vector<double>, Args...>>>
 static inline optimization_result
 remote_vqe(cudaq::quantum_platform &platform, QuantumKernel &&kernel,
-           cudaq::spin_op &H, cudaq::optimizer &optimizer,
+           const cudaq::spin_op &H, cudaq::optimizer &optimizer,
            cudaq::gradient *gradient, const int n_params,
            const std::size_t shots, Args &&...args) {
   auto ctx = std::make_unique<ExecutionContext>("observe", shots);
   ctx->kernelName = cudaq::getKernelName(kernel);
-  ctx->spin = &H;
+  ctx->spin = cudaq::spin_op::canonicalize(H);
   platform.set_exec_ctx(ctx.get());
   auto serializedArgsBuffer = serializeArgs(args...);
   platform.launchVQE(ctx->kernelName, serializedArgsBuffer.data(), gradient, H,
@@ -257,9 +257,6 @@ optimization_result vqe(QuantumKernel &&kernel, cudaq::gradient &gradient,
   auto requires_grad = optimizer.requiresGradients();
   // If there are additional arguments, we need to clone the gradient and
   // provide it the concrete arguments.
-  // Note: the strange initialization of newGrad is to avoid a C++17 compiler
-  // error that happens because the `swap` is ambiguous between the unique_ptr
-  // and the qubit swap.
   std::unique_ptr<cudaq::gradient> newGrad = [&]() {
     if (requires_grad) {
       auto newGrad_ = gradient.clone();

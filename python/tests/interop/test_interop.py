@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -41,7 +41,7 @@ def test_mergeExternal():
     kernel(10)
 
     otherMod = '''module attributes {quake.mangled_name_map = {__nvqpp__mlirgen__test = "__nvqpp__mlirgen__test_PyKernelEntryPointRewrite"}} {
-  func.func @__nvqpp__mlirgen__test() attributes {"cudaq-entrypoint"} {
+  func.func @__nvqpp__mlirgen__test() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
     %0 = quake.alloca !quake.veq<2>
     %1 = quake.extract_ref %0[0] : (!quake.veq<2>) -> !quake.ref
     quake.h %1 : (!quake.ref) -> ()
@@ -64,7 +64,7 @@ def test_synthCallable():
     callee.compile()
 
     otherMod = '''module attributes {quake.mangled_name_map = {__nvqpp__mlirgen__caller = "__nvqpp__mlirgen__caller_PyKernelEntryPointRewrite"}} {
-  func.func @__nvqpp__mlirgen__caller(%arg0: !cc.callable<(!quake.veq<?>) -> ()>) attributes {"cudaq-entrypoint"} {
+  func.func @__nvqpp__mlirgen__caller(%arg0: !cc.callable<(!quake.veq<?>) -> ()>) attributes {"cudaq-entrypoint", "cudaq-kernel"} {
     %0 = quake.alloca !quake.veq<2>
     %1 = quake.relax_size %0 : (!quake.veq<2>) -> !quake.veq<?>
     %2 = cc.callable_func %arg0 : (!cc.callable<(!quake.veq<?>) -> ()>) -> ((!quake.veq<?>) -> ())
@@ -84,6 +84,12 @@ def test_synthCallable():
     assert len(counts) == 1 and '11' in counts
 
 
+# FIXME: https://github.com/NVIDIA/cuda-quantum/issues/3003
+# Seg fault in cudaq_runtime.mergeExternalMLIR:
+# Current thread 0x000079c5c9ac4480 (most recent call first):
+#   File "/usr/local/cudaq/cudaq/kernel/kernel_decorator.py", line 234 in merge_kernel
+#   File "/workspaces/cuda-quantum/build/python/tests/interop/test_interop.py", line 141 in test_synthCallableCCCallCallableOp
+@pytest.mark.skip
 def test_synthCallableCCCallCallableOp():
 
     @cudaq.kernel

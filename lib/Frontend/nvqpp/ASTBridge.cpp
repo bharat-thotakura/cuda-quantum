@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -53,7 +53,7 @@ listReachableFunctions(clang::CallGraphNode *cgn) {
 // Does `ty` refer to a Quake quantum type? This also checks custom recursive
 // types. It does not check builtin recursive types; e.g., `!llvm.ptr<T>`.
 static bool isQubitType(Type ty) {
-  if (ty.isa<quake::RefType, quake::VeqType>())
+  if (quake::isQuakeType(ty))
     return true;
   // FIXME: next if case is a bug.
   if (auto vecTy = dyn_cast<cudaq::cc::StdvecType>(ty))
@@ -318,7 +318,7 @@ public:
 
   bool isTupleReverseVar(clang::VarDecl *decl) {
     if (cudaq::isInNamespace(decl, "cudaq"))
-      return decl->getName().equals("TupleIsReverse");
+      return decl->getName() == "TupleIsReverse";
     return false;
   }
 
@@ -333,8 +333,7 @@ public:
       }
     }
     if (cudaq::isInNamespace(x, "cudaq") &&
-        cudaq::isInNamespace(x, "details") &&
-        x->getName().equals("_nvqpp_sizeof")) {
+        cudaq::isInNamespace(x, "details") && x->getName() == "_nvqpp_sizeof") {
       // This constexpr is the sizeof a pauli_word and a std::string.
       auto loc = x->getLocation();
       auto opt = x->getAnyInitializer()->getIntegerConstantExpr(
@@ -359,10 +358,9 @@ public:
             decl && cudaq::isInNamespace(decl, "cudaq"))
           if (auto *id = decl->getIdentifier()) {
             auto name = id->getName();
-            if (name.equals("qubit") || name.equals("qudit") ||
-                name.equals("qspan") || name.startswith("qreg") ||
-                name.startswith("qvector") || name.startswith("qarray") ||
-                name.startswith("qview"))
+            if (name == "qubit" || name == "qudit" || name == "qspan" ||
+                name.startswith("qreg") || name.startswith("qvector") ||
+                name.startswith("qarray") || name.startswith("qview"))
               cudaq::details::reportClangError(
                   x, mangler,
                   "may not use quantum types in non-kernel functions");
@@ -430,14 +428,17 @@ namespace cudaq::details {
 
 bool QuakeBridgeVisitor::generateFunctionDeclaration(
     StringRef funcName, const clang::FunctionDecl *x) {
-  auto loc = toLocation(x);
   allowUnknownRecordType = true;
-  if (!TraverseType(x->getType()))
-    emitFatalError(loc, "failed to generate type for kernel function");
+  if (!TraverseType(x->getType())) {
+    reportClangError(x, mangler, "failed to generate type for kernel function");
+    typeStack.clear();
+    return false;
+  }
   allowUnknownRecordType = false;
   if (!doSyntaxChecks(x))
     return false;
   auto funcTy = cast<FunctionType>(popType());
+  auto loc = toLocation(x);
   [[maybe_unused]] auto fnPair = getOrAddFunc(loc, funcName, funcTy);
   assert(fnPair.first && "expected FuncOp to be created");
   if (!isa<clang::CXXMethodDecl>(x) || x->isStatic())
@@ -495,7 +496,7 @@ static bool isX86_64(clang::ASTContext &astContext) {
 
 void ASTBridgeAction::ASTBridgeConsumer::addFunctionDecl(
     const clang::FunctionDecl *funcDecl, details::QuakeBridgeVisitor &visitor,
-    FunctionType funcTy, StringRef devFuncName) {
+    FunctionType funcTy, StringRef devFuncName, bool isDecl) {
   auto funcName = visitor.cxxMangledDeclName(funcDecl);
   if (module->lookupSymbol(funcName))
     return;
@@ -514,17 +515,21 @@ void ASTBridgeAction::ASTBridgeConsumer::addFunctionDecl(
                                          ArrayRef<NamedAttribute>{});
   if (!addThisPtr)
     func->setAttr("no_this", build.getUnitAttr());
-  func.setPublic();
 
-  // Create a dummy implementation for the host-side function. This is so that
-  // MLIR's restriction on "public" visibility is met and MLIR does not remove
-  // the declaration before we can autogenerate the code in a later pass.
-  auto *block = func.addEntryBlock();
-  build.setInsertionPointToStart(block);
-  SmallVector<Value> results;
-  for (auto resTy : hostFuncTy.getResults())
-    results.push_back(build.create<cc::UndefOp>(loc, resTy));
-  build.create<func::ReturnOp>(loc, results);
+  if (isDecl) {
+    func.setPrivate();
+  } else {
+    func.setPublic();
+    // Create a dummy implementation for the host-side function. This is so that
+    // MLIR's restriction on "public" visibility is met and MLIR does not remove
+    // the declaration before we can autogenerate the code in a later pass.
+    auto *block = func.addEntryBlock();
+    build.setInsertionPointToStart(block);
+    SmallVector<Value> results;
+    for (auto resTy : hostFuncTy.getResults())
+      results.push_back(build.create<cc::UndefOp>(loc, resTy));
+    build.create<func::ReturnOp>(loc, results);
+  }
 
   // Walk the arguments and add byval attributes where needed.
   assert(visitor.isItaniumCXXABI() && "Microsoft ABI not implemented");
@@ -641,7 +646,7 @@ void ASTBridgeAction::ASTBridgeConsumer::HandleTranslationUnit(
         func->setAttr(entryPointAttrName, unitAttr);
         // Generate a declaration for the CPU C++ function.
         addFunctionDecl(fdPair.second, visitor, func.getFunctionType(),
-                        entryName);
+                        entryName, func.empty());
       }
     }
   }

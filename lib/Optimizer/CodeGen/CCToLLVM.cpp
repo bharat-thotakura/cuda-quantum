@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -93,8 +93,15 @@ public:
     auto one = DenseI64ArrayAttr::get(ctx, ArrayRef<std::int64_t>{1});
     auto extract = rewriter.create<LLVM::ExtractValueOp>(
         loc, structTy.getBody()[1], operands[0], one);
-    auto tupleVal = rewriter.create<LLVM::BitcastOp>(loc, tuplePtrTy, extract);
-    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(callable, tupleTy, tupleVal);
+    if (resTy.size() == 1 && resTy[0] != tupleTy) {
+      auto tupleVal = rewriter.create<LLVM::BitcastOp>(
+          loc, cudaq::opt::factory::getPointerType(resTy[0]), extract);
+      rewriter.replaceOpWithNewOp<LLVM::LoadOp>(callable, tupleVal);
+    } else {
+      auto tupleVal =
+          rewriter.create<LLVM::BitcastOp>(loc, tuplePtrTy, extract);
+      rewriter.replaceOpWithNewOp<LLVM::LoadOp>(callable, tupleTy, tupleVal);
+    }
     return success();
   }
 };
@@ -293,6 +300,9 @@ public:
         .Case([&](LLVM::LLVMPointerType toPtrTy) {
           TypeSwitch<Type>(fromTy)
               .Case([&](LLVM::LLVMPointerType) {
+                boilerplate((LLVM::BitcastOp *)nullptr);
+              })
+              .Case([&](LLVM::LLVMFunctionType) {
                 boilerplate((LLVM::BitcastOp *)nullptr);
               })
               .Case([&](IntegerType) {
@@ -521,8 +531,8 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto inputTy = sizeOfOp.getInputType();
     auto resultTy = sizeOfOp.getType();
-    if (quake::isQuakeType(inputTy) || cudaq::cc::isDynamicType(inputTy)) {
-      // Types that cannot be reified produce the poison op.
+    if (quake::isQuakeType(inputTy) ||
+        cudaq::cc::isDynamicallySizedType(inputTy)) {
       rewriter.replaceOpWithNewOp<cudaq::cc::PoisonOp>(sizeOfOp, resultTy);
       return success();
     }
@@ -610,8 +620,20 @@ public:
                                                  operands[0]);
     val = rewriter.create<LLVM::InsertValueOp>(loc, val, cast, zero);
     auto one = DenseI64ArrayAttr::get(ctx, ArrayRef<std::int64_t>{1});
-    rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(init, val, operands[1],
-                                                     one);
+    if (operands.size() == 2) {
+      rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(init, val, operands[1],
+                                                       one);
+    } else {
+      std::int64_t arrSize =
+          llvm::cast<LLVM::LLVMArrayType>(
+              llvm::cast<LLVM::LLVMPointerType>(operands[0].getType())
+                  .getElementType())
+              .getNumElements();
+      auto i64Ty = rewriter.getI64Type();
+      Value len = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Ty, IntegerAttr::get(i64Ty, arrSize));
+      rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(init, val, len, one);
+    }
     return success();
   }
 };
@@ -710,18 +732,50 @@ public:
     return success();
   }
 };
+
+class VarargCallPattern
+    : public ConvertOpToLLVMPattern<cudaq::cc::VarargCallOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(cudaq::cc::VarargCallOp vcall, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> types;
+    for (auto ty : vcall.getResultTypes())
+      types.push_back(getTypeConverter()->convertType(ty));
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(vcall, types, vcall.getCallee(),
+                                              adaptor.getArgs());
+    return success();
+  }
+};
+
+class NoInlineCallPattern
+    : public ConvertOpToLLVMPattern<cudaq::cc::NoInlineCallOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(cudaq::cc::NoInlineCallOp nicall, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> types;
+    for (auto ty : nicall.getResultTypes())
+      types.push_back(getTypeConverter()->convertType(ty));
+    rewriter.replaceOpWithNewOp<func::CallOp>(nicall, types, nicall.getCallee(),
+                                              adaptor.getArgs());
+    return success();
+  }
+};
 } // namespace
 
 void cudaq::opt::populateCCToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                           RewritePatternSet &patterns) {
-  patterns.insert<AddressOfOpPattern, AllocaOpPattern, CallableClosureOpPattern,
-                  CallableFuncOpPattern, CallCallableOpPattern,
-                  CallIndirectCallableOpPattern, CastOpPattern,
-                  ComputePtrOpPattern, CreateStringLiteralOpPattern,
-                  ExtractValueOpPattern, FuncToPtrOpPattern, GlobalOpPattern,
-                  InsertValueOpPattern, InstantiateCallableOpPattern,
-                  LoadOpPattern, OffsetOfOpPattern, PoisonOpPattern,
-                  SizeOfOpPattern, StdvecDataOpPattern, StdvecInitOpPattern,
-                  StdvecSizeOpPattern, StoreOpPattern, UndefOpPattern>(
-      typeConverter);
+  patterns
+      .insert<AddressOfOpPattern, AllocaOpPattern, CallableClosureOpPattern,
+              CallableFuncOpPattern, CallCallableOpPattern,
+              CallIndirectCallableOpPattern, CastOpPattern, ComputePtrOpPattern,
+              CreateStringLiteralOpPattern, ExtractValueOpPattern,
+              FuncToPtrOpPattern, GlobalOpPattern, InsertValueOpPattern,
+              InstantiateCallableOpPattern, LoadOpPattern, NoInlineCallPattern,
+              OffsetOfOpPattern, PoisonOpPattern, SizeOfOpPattern,
+              StdvecDataOpPattern, StdvecInitOpPattern, StdvecSizeOpPattern,
+              StoreOpPattern, UndefOpPattern, VarargCallPattern>(typeConverter);
 }

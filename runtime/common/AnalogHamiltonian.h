@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #pragma once
+
 #include "common/FmtCore.h"
 #include "nlohmann/json.hpp"
 #include <optional>
@@ -211,7 +212,7 @@ struct Program {
 
 ///////////////////////////////////////////////////////////////////////////////
 // The following classes represent the result of Analog Hamiltonian Simulation
-// program
+// program for the QuEra backend
 
 /// @brief Represents the metadata of the shot
 struct ShotMetadata {

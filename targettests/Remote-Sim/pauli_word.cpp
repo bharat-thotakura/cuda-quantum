@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -9,7 +9,7 @@
 // REQUIRES: remote-sim
 
 // clang-format off
-// RUN: nvq++ %cpp_std --target remote-mqpu --remote-mqpu-auto-launch 1 %s -o %t && %t
+// RUN: nvq++ --target remote-mqpu --remote-mqpu-auto-launch 1 %s -o %t && %t
 // clang-format on
 
 #include "remote_test_assert.h"
@@ -38,7 +38,6 @@ struct kernelVector {
 };
 
 int main() {
-  using namespace cudaq::spin;
   const std::vector<double> h2_data{
       3, 1, 1, 3, 0.0454063,  0,  2, 0, 0, 0, 0.17028,    0,
       0, 0, 2, 0, -0.220041,  -0, 1, 3, 3, 1, 0.0454063,  0,

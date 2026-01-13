@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -22,7 +22,7 @@
 # Quantum build. This Dockerfile copies the built components into the base_image. The specified
 # base_image must contain the necessary CUDA-Q runtime dependencies.
 
-ARG base_image=ubuntu:22.04
+ARG base_image=ubuntu:24.04
 ARG cudaqdev_image=ghcr.io/nvidia/cuda-quantum-dev:latest
 FROM $cudaqdev_image AS cudaqbuild
 
@@ -56,13 +56,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install CUDA-Q runtime dependencies.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libstdc++-12-dev python3 python3-pip \
+        libstdc++-13-dev python3 python3-pip adduser \
     && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --no-cache-dir numpy scipy \
+    && python3 -m pip install --no-cache-dir --break-system-packages numpy scipy \
     && ln -s /bin/python3 /bin/python
 RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ python3-dev \
     # Ref: https://github.com/qutip/qutip/issues/2412
-    && python3 -m pip install --no-cache-dir notebook==7.1.3 "qutip<5" matplotlib \
+    && python3 -m pip install --no-cache-dir --break-system-packages notebook==7.3.2 "qutip<5" matplotlib \
     && apt-get remove -y gcc g++ python3-dev \
     && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -96,10 +96,12 @@ ARG COPYRIGHT_NOTICE="=========================\n\
       NVIDIA CUDA-Q      \n\
 =========================\n\n\
 Version: ${CUDA_QUANTUM_VERSION}\n\n\
-Copyright (c) 2024 NVIDIA Corporation & Affiliates \n\
+Copyright (c) 2026 NVIDIA Corporation & Affiliates \n\
 All rights reserved.\n\n\
 To run a command as administrator (user `root`), use `sudo <command>`.\n"
-RUN echo -e "$COPYRIGHT_NOTICE" > "$CUDA_QUANTUM_PATH/Copyright.txt"
+ARG deprecation_notice=""
+RUN echo -e "$COPYRIGHT_NOTICE" > "$CUDA_QUANTUM_PATH/Copyright.txt" && \
+    echo -e "$deprecation_notice" >> "$CUDA_QUANTUM_PATH/Copyright.txt"
 RUN echo 'cat "$CUDA_QUANTUM_PATH/Copyright.txt"' > /etc/profile.d/welcome.sh
 
 # See also https://github.com/microsoft/vscode-remote-release/issues/4781

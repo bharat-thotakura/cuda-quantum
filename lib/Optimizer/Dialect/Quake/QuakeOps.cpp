@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -23,9 +23,7 @@
 
 using namespace mlir;
 
-namespace {
-#include "cudaq/Optimizer/Dialect/Quake/Canonical.inc"
-} // namespace
+#include "CanonicalPatterns.inc"
 
 static LogicalResult verifyWireResultsAreLinear(Operation *op) {
   for (Value v : op->getOpResults())
@@ -127,15 +125,15 @@ LogicalResult quake::setQuantumOperands(Operation *op, ValueRange quantumVals) {
 Value quake::createConstantAlloca(PatternRewriter &builder, Location loc,
                                   OpResult result, ValueRange args) {
   auto newAlloca = [&]() {
-    if (result.getType().isa<quake::VeqType>() &&
-        result.getType().cast<quake::VeqType>().hasSpecifiedSize()) {
+    if (isa<quake::VeqType>(result.getType()) &&
+        cast<quake::VeqType>(result.getType()).hasSpecifiedSize()) {
       return builder.create<quake::AllocaOp>(
-          loc, result.getType().cast<quake::VeqType>().getSize());
+          loc, cast<quake::VeqType>(result.getType()).getSize());
     }
     auto constOp = cast<arith::ConstantOp>(args[0].getDefiningOp());
     return builder.create<quake::AllocaOp>(
         loc, static_cast<std::size_t>(
-                 constOp.getValue().cast<IntegerAttr>().getInt()));
+                 cast<IntegerAttr>(constOp.getValue()).getInt()));
   }();
   return builder.create<quake::RelaxSizeOp>(
       loc, quake::VeqType::getUnsized(builder.getContext()), newAlloca);
@@ -151,7 +149,7 @@ LogicalResult quake::AllocaOp::verify() {
       if (auto size = getSize()) {
         if (auto cnt =
                 dyn_cast_or_null<arith::ConstantOp>(size.getDefiningOp())) {
-          std::int64_t argSize = cnt.getValue().cast<IntegerAttr>().getInt();
+          std::int64_t argSize = cast<IntegerAttr>(cnt.getValue()).getInt();
           // TODO: This is a questionable check. We could have a very large
           // unsigned value that appears to be negative because of two's
           // complement. On the other hand, allocating 2^64 - 1 qubits isn't
@@ -290,6 +288,108 @@ ParseResult quake::ApplyOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 //===----------------------------------------------------------------------===//
+// ApplyNoiseOp
+//===----------------------------------------------------------------------===//
+
+void quake::ApplyNoiseOp::print(OpAsmPrinter &p) {
+  // noise_func or key
+  p << ' ';
+  if (auto fn = getNoiseFuncAttr())
+    p << fn;
+  else
+    p << getKey();
+  p << '(' << getParameters() << ") " << getQubits() << " : ";
+  SmallVector<Type> operandTys{(*this)->getOperandTypes().begin(),
+                               (*this)->getOperandTypes().end()};
+  p.printFunctionalType(operandTys, (*this)->getResultTypes());
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          {"operand_segment_sizes", getNoiseFuncAttrName()});
+}
+
+ParseResult quake::ApplyNoiseOp::parse(OpAsmParser &parser,
+                                       OperationState &result) {
+  SmallVector<OpAsmParser::UnresolvedOperand> keyOperand;
+  if (parser.parseOperandList(keyOperand))
+    return failure();
+  bool isDirect = keyOperand.empty();
+  if (keyOperand.size() > 1)
+    return failure();
+  if (isDirect) {
+    NamedAttrList attrs;
+    SymbolRefAttr funcAttr;
+    if (parser.parseCustomAttributeWithFallback(
+            funcAttr, parser.getBuilder().getType<NoneType>(),
+            getNoiseFuncAttrNameStr(), attrs))
+      return failure();
+    result.addAttribute(getNoiseFuncAttrNameStr(), funcAttr);
+  }
+
+  SmallVector<OpAsmParser::UnresolvedOperand> parameterOperands;
+  if (succeeded(parser.parseOptionalLParen()))
+    if (parser.parseOperandList(parameterOperands) || parser.parseRParen())
+      return failure();
+
+  SmallVector<OpAsmParser::UnresolvedOperand> targetOperands;
+  if (parser.parseOperandList(targetOperands) || parser.parseColon())
+    return failure();
+
+  FunctionType applyTy;
+  if (parser.parseType(applyTy) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("operand_segment_sizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(keyOperand.size()),
+                           static_cast<int32_t>(parameterOperands.size()),
+                           static_cast<int32_t>(targetOperands.size())}));
+  result.addTypes(applyTy.getResults());
+  if (parser.resolveOperands(llvm::concat<const OpAsmParser::UnresolvedOperand>(
+                                 keyOperand, parameterOperands, targetOperands),
+                             applyTy.getInputs(), parser.getNameLoc(),
+                             result.operands))
+    return failure();
+  return success();
+}
+
+LogicalResult quake::ApplyNoiseOp::verify() {
+  // Must have either a noise_func or a key and not both.
+  if (!getNoiseFuncAttr()) {
+    if (!getKey())
+      return emitOpError("must have a noise function or a key");
+    if (getKey().getType() != IntegerType::get(getContext(), 64))
+      return emitOpError("key must be i64");
+  } else {
+    if (getKey())
+      return emitOpError("cannot have a noise function and a key");
+  }
+
+  // Parameters must be exactly one stdvec or 0 or more ptr<floating-point>.
+  auto params = getParameters();
+  if (params.size() == 1) {
+    if (auto stdvecTy = dyn_cast<cudaq::cc::StdvecType>(params[0].getType())) {
+      if (stdvecTy.getElementType() != Float64Type::get(getContext()))
+        return emitOpError("must be std::vector<double>");
+    } else if (auto ptrTy =
+                   dyn_cast<cudaq::cc::PointerType>(params[0].getType())) {
+      if (!isa<FloatType>(ptrTy.getElementType()))
+        return emitOpError("must be floating-point");
+    } else {
+      return emitOpError("must be std::vector<double> or floating-point");
+    }
+  } else {
+    for (auto p : params)
+      if (auto ptrTy = dyn_cast<cudaq::cc::PointerType>(p.getType()))
+        if (!isa<FloatType>(ptrTy.getElementType()))
+          return emitOpError("must be floating-point");
+  }
+
+  // Must have at least 1 qubit in qubits.
+  if (getQubits().empty())
+    return emitOpError("must have at least one qubit");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // BorrowWire
 //===----------------------------------------------------------------------===//
 
@@ -311,76 +411,59 @@ LogicalResult quake::BorrowWireOp::verify() {
 // Concat
 //===----------------------------------------------------------------------===//
 
-namespace {
-// %7 = quake.concat %4 : (!quake.veq<2>) -> !quake.veq<2>
-// ───────────────────────────────────────────
-// removed
-struct ConcatNoOpPattern : public OpRewritePattern<quake::ConcatOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::ConcatOp concat,
-                                PatternRewriter &rewriter) const override {
-    // Remove concat veq<N> -> veq<N>
-    // or
-    // concat ref -> ref
-    auto qubitsToConcat = concat.getQbits();
-    if (qubitsToConcat.size() > 1)
-      return failure();
-
-    // We only want to handle veq -> veq here.
-    if (isa<quake::RefType>(qubitsToConcat.front().getType())) {
-      return failure();
-    }
-
-    // Do not handle anything where we don't know the sizes.
-    auto retTy = concat.getResult().getType();
-    if (auto veqTy = dyn_cast<quake::VeqType>(retTy))
-      if (!veqTy.hasSpecifiedSize())
-        // This could be a folded quake.relax_size op.
-        return failure();
-
-    rewriter.replaceOp(concat, qubitsToConcat);
-    return success();
-  }
-};
-
-struct ConcatSizePattern : public OpRewritePattern<quake::ConcatOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::ConcatOp concat,
-                                PatternRewriter &rewriter) const override {
-    if (concat.getType().hasSpecifiedSize())
-      return failure();
-
-    // Walk the arguments and sum them, if possible.
-    std::size_t sum = 0;
-    for (auto opnd : concat.getQbits()) {
-      if (auto veqTy = dyn_cast<quake::VeqType>(opnd.getType())) {
-        if (!veqTy.hasSpecifiedSize())
-          return failure();
-        sum += veqTy.getSize();
-        continue;
-      }
-      assert(isa<quake::RefType>(opnd.getType()));
-      sum++;
-    }
-
-    // Leans into the relax_size canonicalization pattern.
-    auto *ctx = rewriter.getContext();
-    auto loc = concat.getLoc();
-    auto newTy = quake::VeqType::get(ctx, sum);
-    Value newOp =
-        rewriter.create<quake::ConcatOp>(loc, newTy, concat.getQbits());
-    auto noSizeTy = quake::VeqType::getUnsized(ctx);
-    rewriter.replaceOpWithNewOp<quake::RelaxSizeOp>(concat, noSizeTy, newOp);
-    return success();
-  };
-};
-} // namespace
-
 void quake::ConcatOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *context) {
   patterns.add<ConcatSizePattern, ConcatNoOpPattern>(context);
+}
+
+//===----------------------------------------------------------------------===//
+// ExpPauliRef
+//===----------------------------------------------------------------------===//
+
+static ParseResult
+parseRawString(OpAsmParser &parser,
+               std::optional<OpAsmParser::UnresolvedOperand> &value,
+               StringAttr &rawString) {
+  std::string stringVal;
+  auto loc = UnknownLoc::get(parser.getContext());
+  if (succeeded(parser.parseOptionalString(&stringVal))) {
+    value = std::nullopt;
+    rawString = StringAttr::get(parser.getContext(), stringVal);
+    return success();
+  }
+  OpAsmParser::UnresolvedOperand operand;
+  if (parser.parseOperand(operand))
+    return emitError(loc, "must be an operand");
+  value = operand;
+  rawString = StringAttr{};
+  return success();
+}
+
+template <typename OP>
+void printRawString(OpAsmPrinter &printer, OP refOp, Value stringVal,
+                    StringAttr rawString) {
+  if (stringVal)
+    printer.printOperand(stringVal);
+  else if (rawString)
+    printer << rawString;
+}
+
+void quake::ExpPauliOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                    MLIRContext *context) {
+  patterns.add<BindExpPauliWord, AdjustAdjointExpPauliPattern>(context);
+}
+
+LogicalResult quake::ExpPauliOp::verify() {
+  if (getPauliLiteralAttr()) {
+    if (getPauli())
+      return emitOpError("cannot have both a literal and a value Pauli word");
+  } else {
+    if (!getPauli())
+      return emitOpError("must have either a literal or a value Pauli word");
+  }
+  if (!(getParameters().empty() || getParameters().size() == 1))
+    return emitOpError("can only have 0 or 1 parameter");
+  return verifyWireResultsAreLinear(getOperation());
 }
 
 //===----------------------------------------------------------------------===//
@@ -417,69 +500,6 @@ void printRawIndex(OpAsmPrinter &printer, OP refOp, Value index,
   else
     printer << rawIndex.getValue();
 }
-
-namespace {
-// %4 = quake.concat %2, %3 : (!quake.ref, !quake.ref) -> !quake.veq<2>
-// %7 = quake.extract_ref %4[0] : (!quake.veq<2>) -> !quake.ref
-// ───────────────────────────────────────────
-// replace all use with %2
-struct ForwardConcatExtractPattern
-    : public OpRewritePattern<quake::ExtractRefOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::ExtractRefOp extract,
-                                PatternRewriter &rewriter) const override {
-    auto veq = extract.getVeq();
-    auto concatOp = veq.getDefiningOp<quake::ConcatOp>();
-    if (concatOp && extract.hasConstantIndex()) {
-      // Don't run this canonicalization if any of the operands
-      // to concat are of type veq.
-      auto concatQubits = concatOp.getQbits();
-      for (auto qOp : concatQubits)
-        if (isa<quake::VeqType>(qOp.getType()))
-          return failure();
-
-      // concat only has ref type operands.
-      auto index = extract.getConstantIndex();
-      if (index < concatQubits.size()) {
-        auto qOpValue = concatQubits[index];
-        if (isa<quake::RefType>(qOpValue.getType())) {
-          rewriter.replaceOp(extract, {qOpValue});
-          return success();
-        }
-      }
-    }
-    return failure();
-  }
-};
-
-// %2 = quake.concat %1 : (!quake.ref) -> !quake.veq<1>
-// %3 = quake.extract_ref %2[0] : (!quake.veq<1>) -> !quake.ref
-// quake.* %3 ...
-// ───────────────────────────────────────────
-// quake.* %1 ...
-struct ForwardConcatExtractSingleton
-    : public OpRewritePattern<quake::ExtractRefOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::ExtractRefOp extract,
-                                PatternRewriter &rewriter) const override {
-    if (auto concat = extract.getVeq().getDefiningOp<quake::ConcatOp>())
-      if (concat.getType().getSize() == 1 && extract.hasConstantIndex() &&
-          extract.getConstantIndex() == 0) {
-        assert(concat.getQbits().size() == 1 && concat.getQbits()[0]);
-        extract.getResult().replaceUsesWithIf(
-            concat.getQbits()[0], [&](OpOperand &use) {
-              if (Operation *user = use.getOwner())
-                return isQuakeOperation(user);
-              return false;
-            });
-        return success();
-      }
-    return failure();
-  }
-};
-} // namespace
 
 void quake::ExtractRefOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
@@ -523,30 +543,6 @@ LogicalResult quake::GetMemberOp::verify() {
   return success();
 }
 
-namespace {
-struct BypassMakeStruq : public OpRewritePattern<quake::GetMemberOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::GetMemberOp getMem,
-                                PatternRewriter &rewriter) const override {
-    if (auto makeStruq =
-            getMem.getStruq().getDefiningOp<quake::MakeStruqOp>()) {
-      auto toStrTy = cast<quake::StruqType>(getMem.getStruq().getType());
-      std::uint32_t idx = getMem.getIndex();
-      Value from = makeStruq.getOperand(idx);
-      auto toTy = toStrTy.getMembers()[idx];
-      if (from.getType() != toTy) {
-        rewriter.replaceOpWithNewOp<quake::RelaxSizeOp>(getMem, toTy, from);
-      } else {
-        rewriter.replaceOp(getMem, from);
-      }
-      return success();
-    }
-    return failure();
-  }
-};
-} // namespace
-
 void quake::GetMemberOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns.add<BypassMakeStruq>(context);
@@ -569,53 +565,11 @@ LogicalResult quake::InitializeStateOp::verify() {
     }
     if (!isa<FloatType, ComplexType>(arrTy.getElementType()))
       return emitOpError("invalid data pointer type");
-  } else if (!isa<FloatType, ComplexType, cudaq::cc::StateType>(ty)) {
+  } else if (!isa<FloatType, ComplexType, quake::StateType>(ty)) {
     return emitOpError("invalid data pointer type");
   }
   return success();
 }
-
-namespace {
-// %22 = quake.init_state %1, %2 : (!quake.veq<k>, T) -> !quake.veq<?>
-// ────────────────────────────────────────────────────────────────────
-// %22' = quake.init_state %1, %2 : (!quake.veq<k>, T) -> !quake.veq<k>
-// %22 = quake.relax_size %22' : (!quake.veq<k>) -> !quake.veq<?>
-struct ForwardAllocaTypePattern
-    : public OpRewritePattern<quake::InitializeStateOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::InitializeStateOp initState,
-                                PatternRewriter &rewriter) const override {
-    if (auto isTy = dyn_cast<quake::VeqType>(initState.getType()))
-      if (!isTy.hasSpecifiedSize()) {
-        auto targ = initState.getTargets();
-        if (auto targTy = dyn_cast<quake::VeqType>(targ.getType()))
-          if (targTy.hasSpecifiedSize()) {
-            auto newInit = rewriter.create<quake::InitializeStateOp>(
-                initState.getLoc(), targTy, targ, initState.getState());
-            rewriter.replaceOpWithNewOp<quake::RelaxSizeOp>(initState, isTy,
-                                                            newInit);
-            return success();
-          }
-      }
-
-    // Remove any intervening cast to !cc.ptr<!cc.array<T x ?>> ops.
-    if (auto stateCast =
-            initState.getState().getDefiningOp<cudaq::cc::CastOp>())
-      if (auto ptrTy = dyn_cast<cudaq::cc::PointerType>(stateCast.getType())) {
-        auto eleTy = ptrTy.getElementType();
-        if (auto arrTy = dyn_cast<cudaq::cc::ArrayType>(eleTy))
-          if (arrTy.isUnknownSize()) {
-            rewriter.replaceOpWithNewOp<quake::InitializeStateOp>(
-                initState, initState.getTargets().getType(),
-                initState.getTargets(), stateCast.getValue());
-            return success();
-          }
-      }
-    return failure();
-  }
-};
-} // namespace
 
 void quake::InitializeStateOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
@@ -652,30 +606,6 @@ LogicalResult quake::RelaxSizeOp::verify() {
   return success();
 }
 
-namespace {
-// Forward the argument to a relax_size to the users for all users that are
-// quake operations. All quake ops that take a sized veq argument are
-// polymorphic on all veq types. If the op is not a quake op, then maintain
-// strong typing.
-struct ForwardRelaxedSizePattern : public RewritePattern {
-  ForwardRelaxedSizePattern(MLIRContext *context)
-      : RewritePattern("quake.relax_size", 1, context, {}) {}
-
-  LogicalResult matchAndRewrite(Operation *op,
-                                PatternRewriter &rewriter) const override {
-    auto relax = cast<quake::RelaxSizeOp>(op);
-    auto inpVec = relax.getInputVec();
-    Value result = relax.getResult();
-    result.replaceUsesWithIf(inpVec, [&](OpOperand &use) {
-      if (Operation *user = use.getOwner())
-        return isQuakeOperation(user) && !isa<quake::ApplyOp>(user);
-      return false;
-    });
-    return success();
-  };
-};
-} // namespace
-
 void quake::RelaxSizeOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns.add<ForwardRelaxedSizePattern>(context);
@@ -709,103 +639,6 @@ LogicalResult quake::SubVeqOp::verify() {
   return success();
 }
 
-namespace {
-// %3 = quake.subveq %0, 4, 10 : (!quake.veq<12>, i64, i64) -> !quake.veq<?>
-// ─────────────────────────────────────────────────────────────────────────────
-// %new3 = quake.subveq %0, 4, 10 : (!quake.veq<12>, i64, i64) -> !quake.veq<7>
-// %3 = quake.relax_size %new3 : (!quake.veq<7>) -> !quake.veq<?>
-struct FixUnspecifiedSubveqPattern : public OpRewritePattern<quake::SubVeqOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::SubVeqOp subveq,
-                                PatternRewriter &rewriter) const override {
-    auto veqTy = dyn_cast<quake::VeqType>(subveq.getType());
-    if (veqTy && veqTy.hasSpecifiedSize())
-      return failure();
-    if (!(subveq.hasConstantLowerBound() && subveq.hasConstantUpperBound()))
-      return failure();
-    auto *ctx = rewriter.getContext();
-    std::size_t size =
-        subveq.getConstantUpperBound() - subveq.getConstantLowerBound() + 1u;
-    auto szVecTy = quake::VeqType::get(ctx, size);
-    auto loc = subveq.getLoc();
-    auto subv = rewriter.create<quake::SubVeqOp>(
-        loc, szVecTy, subveq.getVeq(), subveq.getLower(), subveq.getUpper(),
-        subveq.getRawLower(), subveq.getRawUpper());
-    rewriter.replaceOpWithNewOp<quake::RelaxSizeOp>(subveq, veqTy, subv);
-    return success();
-  }
-};
-
-// %1 = constant 4 : i64
-// %2 = constant 10 : i64
-// %3 = quake.subveq %0, %1, %2 : (!quake.veq<12>, i64, i64) -> !quake.veq<?>
-// ─────────────────────────────────────────────────────────────────────────────
-// %3 = quake.subveq %0, 4, 10 : (!quake.veq<12>, i64, i64) -> !quake.veq<7>
-struct FuseConstantToSubveqPattern : public OpRewritePattern<quake::SubVeqOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::SubVeqOp subveq,
-                                PatternRewriter &rewriter) const override {
-    if (subveq.hasConstantLowerBound() && subveq.hasConstantUpperBound())
-      return failure();
-    bool regen = false;
-    std::int64_t lo = subveq.getConstantLowerBound();
-    Value loVal = subveq.getLower();
-    if (!subveq.hasConstantLowerBound())
-      if (auto olo = cudaq::opt::factory::getIntIfConstant(subveq.getLower())) {
-        regen = true;
-        loVal = nullptr;
-        lo = *olo;
-      }
-
-    std::int64_t hi = subveq.getConstantUpperBound();
-    Value hiVal = subveq.getUpper();
-    if (!subveq.hasConstantUpperBound())
-      if (auto ohi = cudaq::opt::factory::getIntIfConstant(subveq.getUpper())) {
-        regen = true;
-        hiVal = nullptr;
-        hi = *ohi;
-      }
-
-    if (!regen)
-      return failure();
-    rewriter.replaceOpWithNewOp<quake::SubVeqOp>(
-        subveq, subveq.getType(), subveq.getVeq(), loVal, hiVal, lo, hi);
-    return success();
-  }
-};
-
-// Replace subveq operations that extract the entire original register with the
-// original register.
-struct RemoveSubVeqNoOpPattern : public OpRewritePattern<quake::SubVeqOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::SubVeqOp subVeqOp,
-                                PatternRewriter &rewriter) const override {
-    auto origVeq = subVeqOp.getVeq();
-    // The original veq size must be known
-    auto veqType = dyn_cast<quake::VeqType>(origVeq.getType());
-    if (!veqType.hasSpecifiedSize())
-      return failure();
-    if (!(subVeqOp.hasConstantLowerBound() && subVeqOp.hasConstantUpperBound()))
-      return failure();
-
-    // If the subveq is the whole register, than the start value must be 0.
-    if (subVeqOp.getConstantLowerBound() != 0)
-      return failure();
-
-    // If the sizes are equal, then replace
-    if (veqType.getSize() != subVeqOp.getConstantUpperBound() + 1)
-      return failure();
-
-    // this subveq is the whole original register, hence a no-op
-    rewriter.replaceOp(subVeqOp, origVeq);
-    return success();
-  }
-};
-} // namespace
-
 void quake::SubVeqOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *context) {
   patterns.add<FixUnspecifiedSubveqPattern, FuseConstantToSubveqPattern,
@@ -815,32 +648,6 @@ void quake::SubVeqOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 //===----------------------------------------------------------------------===//
 // VeqSizeOp
 //===----------------------------------------------------------------------===//
-
-namespace {
-struct FoldInitStateSizePattern : public OpRewritePattern<quake::VeqSizeOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  // %11 = quake.init_state %_, %_ : (!quake.veq<2>, T1) -> !quake.veq<?>
-  // %12 = quake.veq_size %11 : (!quake.veq<?>) -> i64
-  // ────────────────────────────────────────────────────────────────────
-  // %11 = quake.init_state %_, %_ : (!quake.veq<2>, T1) -> !quake.veq<?>
-  // %12 = constant 2 : i64
-  LogicalResult matchAndRewrite(quake::VeqSizeOp veqSize,
-                                PatternRewriter &rewriter) const override {
-    Value veq = veqSize.getVeq();
-    if (auto initState = veq.getDefiningOp<quake::InitializeStateOp>())
-      if (auto veqTy =
-              dyn_cast<quake::VeqType>(initState.getTargets().getType()))
-        if (veqTy.hasSpecifiedSize()) {
-          std::size_t numQubits = veqTy.getSize();
-          rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(veqSize, numQubits,
-                                                            veqSize.getType());
-          return success();
-        }
-    return failure();
-  }
-};
-} // namespace
 
 void quake::VeqSizeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *context) {
@@ -852,22 +659,6 @@ void quake::VeqSizeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 // WrapOp
 //===----------------------------------------------------------------------===//
 
-namespace {
-// If there is no operation that modifies the wire after it gets unwrapped and
-// before it is wrapped, then the wrap operation is a nop and can be
-// eliminated.
-struct KillDeadWrapPattern : public OpRewritePattern<quake::WrapOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(quake::WrapOp wrap,
-                                PatternRewriter &rewriter) const override {
-    if (auto unwrap = wrap.getWireValue().getDefiningOp<quake::UnwrapOp>())
-      rewriter.eraseOp(wrap);
-    return success();
-  }
-};
-} // namespace
-
 void quake::WrapOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *context) {
   patterns.add<KillDeadWrapPattern>(context);
@@ -878,38 +669,41 @@ void quake::WrapOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 //===----------------------------------------------------------------------===//
 
 // Common verification for measurement operations.
-static LogicalResult verifyMeasurements(Operation *const op,
-                                        TypeRange targetsType,
-                                        const Type bitsType) {
+template <typename MEAS>
+LogicalResult verifyMeasurements(MEAS op, TypeRange targetsType,
+                                 const Type bitsType) {
   if (failed(verifyWireResultsAreLinear(op)))
     return failure();
   bool mustBeStdvec =
       targetsType.size() > 1 ||
       (targetsType.size() == 1 && isa<quake::VeqType>(targetsType[0]));
   if (mustBeStdvec) {
-    if (!isa<cudaq::cc::StdvecType>(op->getResult(0).getType()))
-      return op->emitOpError("must return `!cc.stdvec<!quake.measure>`, when "
-                             "measuring a qreg, a series of qubits, or both");
+    if (!isa<cudaq::cc::StdvecType>(op.getMeasOut().getType()))
+      return op.emitOpError("must return `!cc.stdvec<!quake.measure>`, when "
+                            "measuring a qreg, a series of qubits, or both");
   } else {
-    if (!isa<quake::MeasureType>(op->getResult(0).getType()))
+    if (!isa<quake::MeasureType>(op.getMeasOut().getType()))
       return op->emitOpError(
           "must return `!quake.measure` when measuring exactly one qubit");
   }
+  if (op.getRegisterName())
+    if (op.getRegisterName()->empty())
+      return op->emitError("quake measurement name cannot be empty.");
   return success();
 }
 
 LogicalResult quake::MxOp::verify() {
-  return verifyMeasurements(getOperation(), getTargets().getType(),
+  return verifyMeasurements(*this, getTargets().getType(),
                             getMeasOut().getType());
 }
 
 LogicalResult quake::MyOp::verify() {
-  return verifyMeasurements(getOperation(), getTargets().getType(),
+  return verifyMeasurements(*this, getTargets().getType(),
                             getMeasOut().getType());
 }
 
 LogicalResult quake::MzOp::verify() {
-  return verifyMeasurements(getOperation(), getTargets().getType(),
+  return verifyMeasurements(*this, getTargets().getType(),
                             getMeasOut().getType());
 }
 
@@ -929,6 +723,19 @@ LogicalResult quake::DiscriminateOp::verify() {
       return emitOpError(
           "must return integral type when discriminating exactly one qubit");
   }
+  return success();
+}
+
+LogicalResult quake::BundleCableOp::verify() {
+  auto ty = cast<quake::CableType>(getResult().getType());
+  if (getWires().size() != ty.getSize())
+    return emitOpError("the bundle type size must equal the arity.");
+  return success();
+}
+
+LogicalResult quake::TerminateCableOp::verify() {
+  if (getResults().size() != getCable().getType().getSize())
+    return emitOpError("the bundle type size must equal the coarity.");
   return success();
 }
 
@@ -1040,53 +847,6 @@ void quake::RxOp::getOperatorMatrix(Matrix &matrix) {
                  -1i * std::sin(theta / 2.), std::cos(theta / 2.)});
 }
 
-namespace {
-template <typename OP>
-struct MergeRotationPattern : public OpRewritePattern<OP> {
-  using Base = OpRewritePattern<OP>;
-  using Base::Base;
-
-  LogicalResult matchAndRewrite(OP rotate,
-                                PatternRewriter &rewriter) const override {
-    auto wireTy = quake::WireType::get(rewriter.getContext());
-    if (rotate.getTarget(0).getType() != wireTy ||
-        !rotate.getControls().empty())
-      return failure();
-    assert(!rotate.getNegatedQubitControls());
-    auto input = rotate.getTarget(0).template getDefiningOp<OP>();
-    if (!input || !input.getControls().empty())
-      return failure();
-    assert(!input.getNegatedQubitControls());
-
-    // At this point, we have
-    //   %input  = quake.rotate %angle1, %wire
-    //   %rotate = quake.rotate %angle2, %input
-    // Replace those ops with
-    //   %new    = quake.rotate (%angle1 + %angle2), %wire
-    auto loc = rotate.getLoc();
-    auto angle1 = input.getParameter(0);
-    auto angle2 = rotate.getParameter(0);
-    if (angle1.getType() != angle2.getType())
-      return failure();
-    auto adjAttr = rotate.getIsAdjAttr();
-    auto newAngle = [&]() -> Value {
-      if (input.isAdj() == rotate.isAdj())
-        return rewriter.create<arith::AddFOp>(loc, angle1, angle2);
-      // One is adjoint, so it should be subtracted from the other.
-      if (input.isAdj())
-        return rewriter.create<arith::SubFOp>(loc, angle2, angle1);
-      adjAttr = input.getIsAdjAttr();
-      return rewriter.create<arith::SubFOp>(loc, angle1, angle2);
-    }();
-    rewriter.replaceOpWithNewOp<OP>(rotate, rotate.getResultTypes(), adjAttr,
-                                    ValueRange{newAngle}, ValueRange{},
-                                    ValueRange{input.getTarget(0)},
-                                    rotate.getNegatedQubitControlsAttr());
-    return success();
-  }
-};
-} // namespace
-
 void quake::RxOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                               MLIRContext *context) {
   patterns.add<MergeRotationPattern<quake::RxOp>>(context);
@@ -1187,6 +947,7 @@ void quake::U3Op::getOperatorMatrix(Matrix &matrix) {
     theta *= -1;
     phi *= -1;
     lambda *= -1;
+    std::swap(phi, lambda);
   }
 
   matrix.assign({std::cos(theta / 2.),
@@ -1221,9 +982,9 @@ bool cudaq::EnableInlinerInterface::isLegalToInline(Operation *call,
   if (auto applyOp = dyn_cast<quake::ApplyOp>(call))
     if (applyOp.applyToVariant())
       return false;
-  if (auto destFunc = call->getParentOfType<mlir::func::FuncOp>())
+  if (auto destFunc = call->getParentOfType<func::FuncOp>())
     if (destFunc.getName().ends_with(".thunk"))
-      if (auto srcFunc = call->getParentOfType<mlir::func::FuncOp>())
+      if (auto srcFunc = dyn_cast<func::FuncOp>(callable))
         return !(srcFunc->hasAttr(cudaq::entryPointAttrName));
   return true;
 }
@@ -1293,10 +1054,11 @@ void quake::getOperatorEffectsImpl(EffectsVectorImpl &effects,
 // but not having a way to define them in the ODS.
 // clang-format off
 #define GATE_OPS(MACRO) MACRO(XOp) MACRO(YOp) MACRO(ZOp) MACRO(HOp) MACRO(SOp) \
-  MACRO(TOp) MACRO(SwapOp) MACRO(U2Op) MACRO(U3Op) MACRO(CustomUnitarySymbolOp) \
-  MACRO(R1Op) MACRO(RxOp) MACRO(RyOp) MACRO(RzOp) MACRO(PhasedRxOp)
+  MACRO(TOp) MACRO(SwapOp) MACRO(U2Op) MACRO(U3Op) MACRO(R1Op) MACRO(RxOp)     \
+  MACRO(RyOp) MACRO(RzOp) MACRO(PhasedRxOp) MACRO(CustomUnitarySymbolOp)
 #define MEASURE_OPS(MACRO) MACRO(MxOp) MACRO(MyOp) MACRO(MzOp)
-#define QUANTUM_OPS(MACRO) MACRO(ResetOp) GATE_OPS(MACRO) MEASURE_OPS(MACRO)
+#define QUANTUM_OPS(MACRO) MACRO(ResetOp) MACRO(ExpPauliOp) GATE_OPS(MACRO)    \
+  MEASURE_OPS(MACRO)
 #define WIRE_OPS(MACRO) MACRO(FromControlOp) MACRO(ResetOp) MACRO(NullWireOp)  \
   MACRO(UnwrapOp)
 // clang-format on

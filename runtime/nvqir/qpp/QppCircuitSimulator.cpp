@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -284,7 +284,7 @@ protected:
                                           collapsed_state.rows(),
                                           collapsed_state.cols());
     }
-    cudaq::info("Measured qubit {} -> {}", qubitIdx, measurement_result);
+    CUDAQ_INFO("Measured qubit {} -> {}", qubitIdx, measurement_result);
     return measurement_result == 1 ? true : false;
   }
 
@@ -313,26 +313,15 @@ public:
   }
 
   cudaq::observe_result observe(const cudaq::spin_op &op) override {
-
+    assert(cudaq::spin_op::canonicalize(op) == op);
     flushGateQueue();
 
     // The op is on the following target bits.
-    std::vector<std::size_t> targets;
-    op.for_each_term([&](cudaq::spin_op &term) {
-      term.for_each_pauli(
-          [&](cudaq::pauli p, std::size_t idx) { targets.push_back(idx); });
-    });
-
-    std::sort(targets.begin(), targets.end());
-    const auto last_iter = std::unique(targets.begin(), targets.end());
-    targets.erase(last_iter, targets.end());
+    auto targets = op.degrees();
 
     // Get the matrix as an Eigen matrix
     auto matrix = op.to_matrix();
-    qpp::cmat asEigen =
-        Eigen::Map<Eigen::Matrix<std::complex<double>, Eigen::Dynamic,
-                                 Eigen::Dynamic, Eigen::RowMajor>>(
-            matrix.data(), matrix.rows(), matrix.cols());
+    qpp::cmat asEigen = matrix.as_eigen();
 
     // Compute the expected value
     double ee = 0.0;
@@ -343,9 +332,9 @@ public:
       ee = qpp::apply(asEigen, state, targets).trace().real();
     }
 
-    return cudaq::observe_result(ee, op,
-                                 cudaq::sample_result(cudaq::ExecutionResult(
-                                     {}, op.to_string(false), ee)));
+    return cudaq::observe_result(
+        ee, op,
+        cudaq::sample_result(cudaq::ExecutionResult({}, op.to_string(), ee)));
   }
 
   /// @brief Reset the qubit
@@ -362,7 +351,7 @@ public:
                                 const int shots) override {
     if (shots < 1) {
       double expectationValue = calculateExpectationValue(qubits);
-      cudaq::info("Computed expectation value = {}", expectationValue);
+      CUDAQ_INFO("Computed expectation value = {}", expectationValue);
       return cudaq::ExecutionResult{{}, expectationValue};
     }
 

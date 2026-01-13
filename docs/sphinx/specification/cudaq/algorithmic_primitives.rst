@@ -130,12 +130,16 @@ extract the result information in the following manner:
       };
     }
 
-**[7]** The :code:`sample_result` type enables one to encode measurement results from a 
-quantum circuit sampling task. It keeps track of a list of sample results, each 
-one corresponding to a measurement action during the sampling process and represented 
-by a unique register name. It also tracks a unique global register, the implicit sampling 
-of the state at the end of circuit execution. The API gives fine-grain access 
-to the measurement results for each register. To illustrate this, observe 
+**[7]** By default the :code:`sample_result` type enables one to encode 
+measurement results from a quantum circuit sampling task. It keeps track of a 
+list of sample results, each one corresponding to a measurement action during 
+the sampling process and represented by a unique register name. It also tracks 
+a unique global register, which by default, contains the implicit sampling of 
+the state at the end of circuit execution. If the :code:`explicit_measurements` 
+sample option is enabled, the global register contains all measurements 
+concatenated together in the order the measurements occurred in the kernel. 
+The API gives fine-grain access to the measurement results for each register. 
+To illustrate this, observe 
 
 .. tab:: C++ 
 
@@ -148,7 +152,13 @@ to the measurement results for each register. To illustrate this, observe
       reset (q);
       x(q);
     };
+    
+    printf("Default - no explicit measurements\n");
     cudaq::sample(kernel).dump();
+
+    cudaq::sample_options options{.explicit_measurements = true};
+    printf("Setting `explicit_measurements` option\n");
+    cudaq::sample(options, kernel).dump();
 
 .. tab:: Python 
 
@@ -162,30 +172,41 @@ to the measurement results for each register. To illustrate this, observe
        reset(q)
        x(q)
     
+    print("Default - no explicit measurements")
     cudaq.sample(kernel).dump()
+
+    print("Setting `explicit_measurements` option")
+    cudaq.sample(kernel, explicit_measurements=True).dump() 
 
 should produce 
 
 .. code-block:: bash 
 
+    Default - no explicit measurements
     { 
       __global__ : { 1:1000 }
-      reg1 : { 0:501 1:499 }
+      reg1 : { 0:506 1:494 }
     }
+
+    Setting `explicit_measurements` option
+    { 0:479 1:521 }
 
 Here we see that we have measured a qubit in a uniform superposition to a 
 register named :code:`reg1`, and followed it with a reset and the application 
-of an NOT operation. The :code:`sample_result` returned for this sampling 
-tasks contains the default :code:`__global__` register as well as the user 
-specified :code:`reg1` register. 
+of an NOT operation. By default the :code:`sample_result` returned for this 
+sampling tasks contains the default :code:`__global__` register as well as the 
+user specified :code:`reg1` register. 
 
 The contents of the :code:`__global__` register will depend on how your kernel
 is written:
 
-1. If no measurements appear in the kernel, then the :code:`__global__`
-   register is formed with implicit measurements being added for *all* the
-   qubits defined in the kernel, and the measurements all occur at the end of
-   the kernel. The order of the bits in the bitstring corresponds to the qubit
+1. If no measurements appear in the kernel, then the :code:`__global__` 
+   register is formed with implicit measurements being added for *all* the 
+   qubits defined in the kernel, and the measurements all occur at the end of 
+   the kernel. This is not supported when sampling with the 
+   :code:`explicit_measurements` option; kernels executed with 
+   :code:`explicit_measurements` mode must contain measurements.   
+   The order of the bits in the bitstring corresponds to the qubit
    allocation order specified in the kernel.  That is - the :code:`[0]` element
    in the :code:`__global__` bitstring corresponds with the first declared qubit
    in the kernel. For example,
@@ -222,12 +243,15 @@ should produce
 2. Conversely, if any measurements appear in the kernel, then only the measured
    qubits will appear in the :code:`__global__` register. Similar to #1, the 
    bitstring corresponds to the qubit allocation order specified in the kernel.
-   Also (again, similar to #1), the values of the sampled qubits always
-   correspond to the values *at the end of the kernel execution*. That is - if a
-   qubit is measured in the middle of a kernel and subsequent operations change
-   the state of the qubit, the qubit will be implicitly re-measured at the end
-   of the kernel, and that re-measured value is the value that will appear in
-   the :code:`__global__` register. For example,
+   Also (again, similar to #1), the values of the sampled qubits always 
+   correspond to the values *at the end of the kernel execution*, unless the 
+   :code:`explicit_measurements` option is enabled. That is - if a qubit is 
+   measured in the middle of a kernel and subsequent operations change the state
+   of the qubit, the qubit will be implicitly re-measured at the end of the 
+   kernel, and that re-measured value is the value that will appear in the 
+   :code:`__global__` register. If the sampling option :code:`explicit_measurements` 
+   is enabled, then no re-measurements occur, and the global register contains 
+   the concatenated measurements in the order they were executed in the kernel.
 
 .. tab:: C++ 
 
@@ -239,7 +263,13 @@ should produce
          mz(b);
          mz(a);
        };
+       
+       printf("Default - no explicit measurements\n");
        cudaq::sample(kernel).dump();
+
+       cudaq::sample_options options{.explicit_measurements = true};
+       printf("Setting `explicit_measurements` option\n");
+       cudaq::sample(options, kernel).dump();
 
 .. tab:: Python 
 
@@ -252,15 +282,21 @@ should produce
         mz(b)
         mz(a)
 
-    cudaq.sample(kernel).dump() 
+    print("Default - no explicit measurements")
+    cudaq.sample(kernel).dump()
+
+    print("Setting `explicit_measurements` option")
+    cudaq.sample(kernel, explicit_measurements=True).dump()
   
 should produce 
 
    .. code-block:: bash 
 
-       { 
-         __global__ : { 10:1000 }
-       }
+       Default - no explicit measurements
+       { 10:1000 }
+
+       Setting `explicit_measurements` option
+       { 01:1000 }
 
 .. note::
 
@@ -302,6 +338,124 @@ Programmers can asynchronously launch sampling tasks on any :code:`qpu_id`.
 information and can be persisted to file and loaded from file at a later time. After loading from file, 
 and when remote queue jobs are completed, one can invoke :code:`get()` and the results will 
 be retrieved and returned. 
+
+:code:`cudaq::run`
+-------------------------
+**[1]** The :code:`cudaq::run` API allows programmers to execute a kernel a specified number 
+of times and retrieve all the individual values returned. Unlike :code:`cudaq::sample`, which 
+collects measurement statistics as a counts dictionary mapping bit strings to frequencies, :code:`run` 
+preserves each individual return value from every execution. Use :code:`sample` when you need 
+quantum state measurement statistics, and use :code:`run` when you need to analyze individual 
+return values from each circuit execution.
+
+**[2]** The CUDA-Q model provides this functionality via template functions within the
+:code:`cudaq` namespace with the following structure:
+
+.. code-block:: cpp
+
+    // Run a kernel for specified number of shots 
+    template <typename QuantumKernel, typename... ARGS>
+      requires(!std::is_void_v<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>)
+    std::vector<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>
+    run(std::size_t shots, QuantumKernel &&kernel, ARGS &&...args);
+
+    // Run a kernel with noise model for specified number of shots
+    template <typename QuantumKernel, typename... ARGS>
+      requires(!std::is_void_v<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>)
+    std::vector<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>
+    run(std::size_t shots, cudaq::noise_model &noise_model, QuantumKernel &&kernel, ARGS &&...args);
+
+**[3]** This function takes as input the number of shots, a quantum kernel instance, and the
+concrete arguments with which the kernel should be invoked. CUDA-Q kernel passed to this
+function must be an entry-point kernel and must return a non-void value.
+
+**[4]** Overloaded function exists for specifying a noise model to apply during execution.
+
+**[5]** The function returns a :code:`std::vector` containing the return values from each execution 
+of the kernel. The vector has a length equal to the number of specified shots, with each element 
+representing the return value of a single kernel execution.
+
+**[6]** Programmers can extract the result information in the following manner:
+
+.. tab:: C++
+
+  .. code-block:: cpp
+
+      auto kernel = [](int numQubits) __qpu__ {
+        // Quantum code that returns an int
+        cudaq::qvector q(numQubits);
+        h(q);
+        // some logic...
+        return result;
+      };
+      
+      // Run the kernel 100 times with 4 qubits
+      auto results = cudaq::run(100, kernel, 4);
+  
+      // Process the results
+      for (const auto& result : results) {
+        printf("Result: %d\n", result);
+      }
+
+.. tab:: Python
+
+  .. code-block:: python
+
+    @cudaq.kernel
+    def kernel(numQubits: int) -> int:
+        # Quantum code that returns an int
+        q = cudaq.qvector(numQubits)
+        h(q)
+        # some logic...
+        return result
+    
+    # Run the kernel 100 times with 4 qubits
+    results = cudaq.run(kernel, 4, shots_count=100)
+    
+    # Process the results
+    for result in results:
+        print(f"Result: {result}")
+
+**[7]** The :code:`cudaq::run` function supports a variety of return types from the quantum kernel:
+
+- Scalar types: :code:`bool`, :code:`int`, :code:`float`, and their variants (:code:`int8/16/32/64`, :code:`float32/64`)
+- Vector/List types: :code:`std::vector<T>` in C++ and :code:`list[T]` in Python, where :code:`T` can be :code:`bool`, :code:`int`, :code:`float`, and their variants 
+- User-defined data structures (via custom structs in C++ or :code:`dataclass` in Python)
+
+**[7.1]** Note: Nested or aggregate vectors / lists / structs (e.g., :code:`list[list[int]]`) are not yet supported.
+
+**[7.2]** For Python, tuple return types are supported with limitations:
+
+- Elements can be scalar types (:code:`bool`, :code:`int`, :code:`float`)
+- Tuple elements are immutable and cannot be modified within the kernel
+- Note: :code:`std::tuple` is not supported in C++ - use custom structs instead
+
+**[7.3]** For Python, :code:`dataclass` return types are supported with limitations:
+
+- Must use :code:`@dataclass(slots=True)` decorator
+- Cannot contain user-defined methods beyond generated ones
+- Can be created and modified within the kernel using :code:`.copy()` for modifications
+
+**[8]** There are specific requirements on input quantum kernels for the use of the
+:code:`run` function which must be enforced by compiler implementations:
+
+- The kernel must be an entry-point kernel
+- The kernel must return a non-void value
+- The kernel must have a return statement in all code paths
+
+**[9]** CUDA-Q also provides an asynchronous version of this function
+(:code:`cudaq::run_async`) which returns a :code:`std::future`:
+
+.. code-block:: cpp
+
+    template <typename QuantumKernel, typename... ARGS>
+      requires(!std::is_void_v<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>)
+    std::future<std::vector<std::invoke_result_t<std::decay_t<QuantumKernel>, std::decay_t<ARGS>...>>>
+    run_async(std::size_t qpu_id, std::size_t shots, QuantumKernel &&kernel, ARGS &&...args);
+
+Programmers can asynchronously launch kernel executions on any :code:`qpu_id` and retrieve results 
+when ready using the returned future's :code:`get()` method.
+
 
 :code:`cudaq::observe`
 -------------------------
@@ -404,11 +558,10 @@ Here is an example of the utility of the :code:`cudaq::observe` function:
         }
       };
     
-      int main() {
-        using namespace cudaq::spin; // make it easier to use pauli X,Y,Z below
-    
-        spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                    .21829 * z(0) - 6.125 * z(1);
+      int main() {    
+        spin_op h = 5.907 - 2.1433 * cudaq::spin_op::x(0) * cudaq::spin_op::x(1) - 
+                    2.1433 * cudaq::spin_op::y(0) * cudaq::spin_op::y(1) +
+                    .21829 * cudaq::spin_op::z(0) - 6.125 * cudaq::spin_op::z(1);
     
         double energy = cudaq::observe(ansatz{}, h, .59);
         printf("Energy is %lf\n", energy); 
@@ -634,4 +787,3 @@ default :code:`std::vector<double>` signature):
 
     // Print the results
     printf("Optimizer found %lf at [%lf,%lf]\n", min_val, opt_params[0], opt_params[1]);
-

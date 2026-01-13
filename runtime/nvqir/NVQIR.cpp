@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,13 +7,17 @@
  ******************************************************************************/
 
 #include "CircuitSimulator.h"
+#include "NVQIRUtil.h"
 #include "QIRTypes.h"
 #include "common/Logger.h"
 #include "common/PluginUtils.h"
+#include "cudaq/qis/qudit.h"
 #include "cudaq/qis/state.h"
-#include "cudaq/spin_op.h"
+// TODO: do we want to avoid including this here?
+#include "resourcecounter/ResourceCounter.h"
 #include <cmath>
 #include <complex>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -33,6 +37,7 @@
 
 // Is the library initialized?
 thread_local bool initialized = false;
+thread_local bool using_resource_counter = false;
 thread_local nvqir::CircuitSimulator *simulator;
 inline static constexpr std::string_view GetCircuitSimulatorSymbol =
     "getCircuitSimulator";
@@ -67,7 +72,7 @@ void __nvqir__setCircuitSimulator(nvqir::CircuitSimulator *sim) {
     delete ptr;
   }
   externSimGenerator = std::make_unique<ExternallyProvidedSimGenerator>(sim);
-  cudaq::info("[runtime] Setting the circuit simulator to {}.", sim->name());
+  CUDAQ_INFO("[runtime] Setting the circuit simulator to {}.", sim->name());
 }
 }
 
@@ -77,6 +82,9 @@ namespace nvqir {
 /// already.
 /// @return
 CircuitSimulator *getCircuitSimulatorInternal() {
+  if (using_resource_counter)
+    return getResourceCounterSimulator();
+
   if (simulator)
     return simulator;
 
@@ -87,9 +95,18 @@ CircuitSimulator *getCircuitSimulatorInternal() {
 
   simulator = cudaq::getUniquePluginInstance<CircuitSimulator>(
       GetCircuitSimulatorSymbol);
-  cudaq::info("Creating the {} backend.", simulator->name());
+  CUDAQ_INFO("Creating the {} backend.", simulator->name());
   return simulator;
 }
+
+void switchToResourceCounterSimulator() { using_resource_counter = true; }
+
+void stopUsingResourceCounterSimulator() {
+  using_resource_counter = false;
+  getResourceCounterSimulator()->setToZeroState();
+}
+
+bool isUsingResourceCounterSimulator() { return using_resource_counter; }
 
 void setRandomSeed(std::size_t seed) {
   getCircuitSimulatorInternal()->setRandomSeed(seed);
@@ -107,32 +124,39 @@ void tearDownBeforeMPIFinalize() {
   getCircuitSimulatorInternal()->tearDownBeforeMPIFinalize();
 }
 
-/// @brief Store allocated Array pointers
-thread_local static std::vector<std::unique_ptr<Array>> allocatedArrays;
-
 /// @brief Store allocated Qubit pointers
 thread_local static std::vector<std::unique_ptr<Qubit>> allocatedSingleQubits;
 
 /// @brief Utility function mapping qubit ids to a QIR Array pointer
+// Qubits are newly constructed in the returned array. Hence, the caller must
+// manage their lifetime.
+// For example, this can be used for allocating qubit arrays whereby the
+// corresponding deallocation (`__quantum__rt__qubit_release_array`) would clean
+// up the qubits.
+//
+// IMPORTANT: don't use this for borrowed qubit indices as that
+// will result in leak.
 Array *vectorSizetToArray(std::vector<std::size_t> &idxs) {
-  auto newArray = std::make_unique<Array>(idxs.size(), sizeof(std::size_t));
+  Array *newArray = new Array(idxs.size(), sizeof(std::size_t));
   for (std::size_t i = 0; i < idxs.size(); i++) {
     auto qbit = new Qubit{idxs[i]};
     auto arrayPtr = (*newArray)[i];
     *reinterpret_cast<Qubit **>(arrayPtr) = qbit;
   }
-  nvqir::allocatedArrays.emplace_back(std::move(newArray));
-  return nvqir::allocatedArrays.back().get();
+  nvqir::ArrayTracker::getInstance().track(newArray);
+  return newArray;
 }
 
 /// @brief Utility function mapping a QIR Array pointer to a vector of ids
 std::vector<std::size_t> arrayToVectorSizeT(Array *arr) {
+  assert(arr && "array must not be null");
   std::vector<std::size_t> ret;
-  for (std::size_t i = 0; i < arr->size(); i++) {
+  const auto arrSize = arr->size();
+  for (std::size_t i = 0; i < arrSize; ++i) {
     auto arrayPtr = (*arr)[i];
     Qubit *idxVal = *reinterpret_cast<Qubit **>(arrayPtr);
     if (qubitPtrIsIndex)
-      ret.push_back((intptr_t)idxVal);
+      ret.push_back(reinterpret_cast<intptr_t>(idxVal));
     else
       ret.push_back(idxVal->idx);
   }
@@ -143,7 +167,7 @@ std::vector<std::size_t> arrayToVectorSizeT(Array *arr) {
 std::size_t qubitToSizeT(Qubit *q) {
   if (qubitPtrIsIndex)
     return (intptr_t)q;
-
+  assert(q && "qubit must not be null");
   return q->idx;
 }
 
@@ -176,8 +200,8 @@ std::unique_ptr<std::complex<To>[]> convertToComplex(std::complex<From> *data,
   auto size = pow(2, numQubits);
   constexpr auto toType = typeName<To>();
   constexpr auto fromType = typeName<From>();
-  cudaq::info("copying {} complex<{}> values to complex<{}>", size, fromType,
-              toType);
+  CUDAQ_INFO("copying {} complex<{}> values to complex<{}>", size, fromType,
+             toType);
 
   auto convertData = std::make_unique<std::complex<To>[]>(size);
   for (std::size_t i = 0; i < size; ++i)
@@ -195,7 +219,7 @@ std::unique_ptr<std::complex<To>[]> convertToComplex(From *data,
   auto size = pow(2, numQubits);
   constexpr auto toType = typeName<To>();
   constexpr auto fromType = typeName<From>();
-  cudaq::info("copying {} {} values to complex<{}>", size, fromType, toType);
+  CUDAQ_INFO("copying {} {} values to complex<{}>", size, fromType, toType);
 
   auto convertData = std::make_unique<std::complex<To>[]>(size);
   for (std::size_t i = 0; i < size; ++i)
@@ -204,9 +228,33 @@ std::unique_ptr<std::complex<To>[]> convertToComplex(From *data,
   return convertData;
 }
 
+// Util function to access the current QIR output.
+// Note: as the QIR output is attached to a specific simulator backend instance,
+// the QIR output must be retrieved from the same thread as each thread will
+// have a different simulator instance, e.g., async. execution.
+std::string_view getQirOutputLog() {
+  auto *circuitSimulator = nvqir::getCircuitSimulatorInternal();
+  return circuitSimulator->outputLog;
+}
+void clearQirOutputLog() {
+  auto *circuitSimulator = nvqir::getCircuitSimulatorInternal();
+  return circuitSimulator->outputLog.clear();
+}
 } // namespace nvqir
 
 using namespace nvqir;
+
+template <typename VAL>
+void quantumRTGenericRecordOutput(const char *type, VAL val,
+                                  const char *label) {
+  auto *circuitSimulator = nvqir::getCircuitSimulatorInternal();
+  std::ostringstream ss;
+  ss << "OUTPUT\t" << type << "\t" << val << '\t';
+  if (label)
+    ss << label;
+  ss << '\n';
+  circuitSimulator->outputLog += ss.str();
+}
 
 extern "C" {
 
@@ -242,9 +290,9 @@ void __quantum__rt__setExecutionContext(cudaq::ExecutionContext *ctx) {
 
   if (ctx) {
     ScopedTraceWithContext("NVQIR::setExecutionContext", ctx->name);
-    cudaq::info("Setting execution context: {}{}", ctx ? ctx->name : "basic",
-                ctx->hasConditionalsOnMeasureResults ? " with conditionals"
-                                                     : "");
+    CUDAQ_INFO("Setting execution context: {}{}", ctx ? ctx->name : "basic",
+               ctx->hasConditionalsOnMeasureResults ? " with conditionals"
+                                                    : "");
     nvqir::getCircuitSimulatorInternal()->setExecutionContext(ctx);
   }
 }
@@ -252,12 +300,12 @@ void __quantum__rt__setExecutionContext(cudaq::ExecutionContext *ctx) {
 /// @brief Reset the Execution Context
 void __quantum__rt__resetExecutionContext() {
   ScopedTraceWithContext("NVQIR::resetExecutionContext");
-  cudaq::info("Resetting execution context.");
+  CUDAQ_INFO("Resetting execution context.");
   nvqir::getCircuitSimulatorInternal()->resetExecutionContext();
 }
 
 /// @brief QIR function for allocated a qubit array
-Array *__quantum__rt__qubit_allocate_array(uint64_t numQubits) {
+Array *__quantum__rt__qubit_allocate_array(std::uint64_t numQubits) {
   ScopedTraceWithContext("NVQIR::qubit_allocate_array", numQubits);
   __quantum__rt__initialize(0, nullptr);
   auto qubitIdxs =
@@ -266,10 +314,10 @@ Array *__quantum__rt__qubit_allocate_array(uint64_t numQubits) {
 }
 
 Array *__quantum__rt__qubit_allocate_array_with_state_complex32(
-    uint64_t numQubits, std::complex<float> *data);
+    std::uint64_t numQubits, std::complex<float> *data);
 
 Array *__quantum__rt__qubit_allocate_array_with_state_complex64(
-    uint64_t numQubits, std::complex<double> *data) {
+    std::uint64_t numQubits, std::complex<double> *data) {
   ScopedTraceWithContext("NVQIR::qubit_allocate_array_with_data_complex64",
                          numQubits);
   __quantum__rt__initialize(0, nullptr);
@@ -284,8 +332,9 @@ Array *__quantum__rt__qubit_allocate_array_with_state_complex64(
   return vectorSizetToArray(qubitIdxs);
 }
 
-Array *__quantum__rt__qubit_allocate_array_with_state_fp64(uint64_t numQubits,
-                                                           double *data) {
+Array *
+__quantum__rt__qubit_allocate_array_with_state_fp64(std::uint64_t numQubits,
+                                                    double *data) {
   ScopedTraceWithContext("NVQIR::qubit_allocate_array_with_data_fp64",
                          numQubits);
   if (nvqir::getCircuitSimulatorInternal()->isDoublePrecision()) {
@@ -314,7 +363,7 @@ Array *__quantum__rt__qubit_allocate_array_with_state_ptr(
 }
 
 Array *
-__quantum__rt__qubit_allocate_array_with_cudaq_state_ptr(int _,
+__quantum__rt__qubit_allocate_array_with_cudaq_state_ptr(std::uint64_t,
                                                          cudaq::state *state) {
   if (!state)
     throw std::invalid_argument("[NVQIR] Invalid state encountered "
@@ -366,13 +415,8 @@ void __quantum__rt__qubit_release_array(Array *arr) {
     nvqir::getCircuitSimulatorInternal()->deallocate(idxVal->idx);
     delete idxVal;
   }
-  auto begin = nvqir::allocatedArrays.begin();
-  auto end = nvqir::allocatedArrays.end();
-  nvqir::allocatedArrays.erase(
-      std::remove_if(
-          begin, end,
-          [&](std::unique_ptr<Array> &array) { return arr == array.get(); }),
-      end);
+  delete arr;
+  nvqir::ArrayTracker::getInstance().untrack(arr);
   return;
 }
 
@@ -402,6 +446,26 @@ void __quantum__rt__deallocate_all(const std::size_t numQubits,
                                    const std::size_t *qubitIdxs) {
   std::vector<std::size_t> qubits(qubitIdxs, qubitIdxs + numQubits);
   nvqir::getCircuitSimulatorInternal()->deallocateQubits(qubits);
+}
+
+void __quantum__rt__bool_record_output(bool val, const char *label) {
+  quantumRTGenericRecordOutput("BOOL", (val ? "true" : "false"), label);
+}
+
+void __quantum__rt__int_record_output(std::int64_t val, const char *label) {
+  quantumRTGenericRecordOutput("INT", val, label);
+}
+
+void __quantum__rt__double_record_output(double val, const char *label) {
+  quantumRTGenericRecordOutput("DOUBLE", val, label);
+}
+
+void __quantum__rt__tuple_record_output(std::uint64_t len, const char *label) {
+  quantumRTGenericRecordOutput("TUPLE", len, label);
+}
+
+void __quantum__rt__array_record_output(std::uint64_t len, const char *label) {
+  quantumRTGenericRecordOutput("ARRAY", len, label);
 }
 
 #define ONE_QUBIT_QIS_FUNCTION(GATENAME)                                       \
@@ -492,11 +556,7 @@ void __quantum__qis__cphase(double d, Qubit *q, Qubit *r) {
 
 void __quantum__qis__phased_rx(double theta, double phi, Qubit *q) {
   auto qI = qubitToSizeT(q);
-  std::complex<double> i(0, 1.);
-  std::vector<std::complex<double>> matrix{
-      std::cos(theta / 2.), -i * std::exp(-i * phi) * std::sin(theta / 2.),
-      -i * std::exp(i * phi) * std::sin(theta / 2.), std::cos(theta / 2.)};
-  nvqir::getCircuitSimulatorInternal()->applyCustomOperation(matrix, {}, {qI});
+  nvqir::getCircuitSimulatorInternal()->phased_rx(theta, phi, qI);
 }
 
 void __quantum__qis__phased_rx__body(double theta, double phi, Qubit *q) {
@@ -583,6 +643,10 @@ bool __quantum__qis__read_result__body(Result *result) {
   return ResultZeroVal;
 }
 
+bool __quantum__rt__read_result(Result *result) {
+  return __quantum__qis__read_result__body(result);
+}
+
 Result *__quantum__qis__mz__to__register(Qubit *q, const char *name) {
   std::string regName(name);
   auto qI = qubitToSizeT(q);
@@ -604,16 +668,208 @@ void __quantum__qis__exp_pauli(double theta, Array *qubits, char *pauliWord) {
   return;
 }
 
+void __quantum__qis__exp_pauli__ctl(double theta, Array *ctrls, Array *qubits,
+                                    char *pauliWord) {
+  struct CLikeString {
+    char *ptr = nullptr;
+    int64_t length = 0;
+  };
+  auto *castedString = reinterpret_cast<CLikeString *>(pauliWord);
+  std::string pauliWordStr(castedString->ptr, castedString->length);
+  auto ctrlQubitsVec = arrayToVectorSizeT(ctrls);
+  auto qubitsVec = arrayToVectorSizeT(qubits);
+  nvqir::getCircuitSimulatorInternal()->applyExpPauli(
+      theta, ctrlQubitsVec, qubitsVec, cudaq::spin_op::from_word(pauliWordStr));
+  return;
+}
+
+void __quantum__qis__exp_pauli__body(double theta, Array *qubits,
+                                     char *pauliWord) {
+  return __quantum__qis__exp_pauli(theta, qubits, pauliWord);
+}
+
 void __quantum__rt__result_record_output(Result *r, int8_t *name) {
+  auto *ctx = nvqir::getCircuitSimulatorInternal()->getExecutionContext();
+  if (ctx && ctx->name == "run") {
+
+    std::string regName(reinterpret_cast<const char *>(name));
+    auto qI = qubitToSizeT(measRes2QB[r]);
+    auto b = nvqir::getCircuitSimulatorInternal()->mz(qI, regName);
+    quantumRTGenericRecordOutput("RESULT", (b ? 1 : 0), regName.c_str());
+    return;
+  }
+
   if (name && qubitPtrIsIndex)
     __quantum__qis__mz__to__register(measRes2QB[r],
                                      reinterpret_cast<const char *>(name));
 }
 
+static std::vector<std::size_t> safeArrayToVectorSizeT(Array *arr) {
+  if (!arr)
+    return {};
+  return arrayToVectorSizeT(arr);
+}
+
+// It may not always be possible for the compiler to reduce a program fully to
+// QIR. In such cases, code generation may elect to produce a trap in the
+// kernel, which calls this function. The trap should explain the issue to the
+// user and about the kernel when executed.
+void __quantum__qis__trap(std::int64_t code) {
+  if (code == 0)
+    throw std::runtime_error("could not autogenerate the adjoint of a kernel");
+  if (code == 1)
+    throw std::runtime_error("unsupported return type from entry-point kernel");
+  throw std::runtime_error("code generation failure for target");
+}
+
+void __quantum__qis__apply_kraus_channel_double(std::int64_t krausChannelKey,
+                                                double *params,
+                                                std::size_t numParams,
+                                                Array *qubits) {
+
+  auto *ctx = nvqir::getCircuitSimulatorInternal()->getExecutionContext();
+  if (!ctx)
+    return;
+
+  auto *noise = ctx->noiseModel;
+  // per-spec, no noise model provided, emit warning, no application
+  if (!noise)
+    return cudaq::details::warn(
+        "apply_noise called but no noise model provided.");
+
+  std::vector<double> paramVec(params, params + numParams);
+  auto channel = noise->get_channel(krausChannelKey, paramVec);
+  nvqir::getCircuitSimulatorInternal()->applyNoise(channel,
+                                                   arrayToVectorSizeT(qubits));
+}
+
+static void
+__quantum__qis__apply_kraus_channel_float(std::int64_t krausChannelKey,
+                                          float *params, std::size_t numParams,
+                                          Array *qubits) {
+
+  auto *ctx = nvqir::getCircuitSimulatorInternal()->getExecutionContext();
+  if (!ctx)
+    return;
+
+  auto *noise = ctx->noiseModel;
+  // per-spec, no noise model provided, emit warning, no application
+  if (!noise)
+    return cudaq::details::warn(
+        "apply_noise called but no noise model provided.");
+
+  std::vector<float> paramVec(params, params + numParams);
+  auto channel = noise->get_channel(krausChannelKey, paramVec);
+  nvqir::getCircuitSimulatorInternal()->applyNoise(channel,
+                                                   arrayToVectorSizeT(qubits));
+}
+
+// The dataKind encoding is defined in QIRFunctionNames.h. 0 is float, 1 is
+// double.
+void __quantum__qis__apply_kraus_channel_generalized(
+    std::int64_t dataKind, std::int64_t krausChannelKey, std::size_t numSpans,
+    std::size_t numParams, std::size_t numTargets, ...) {
+  va_list args;
+  va_start(args, numTargets);
+
+  auto vapplyKrausChannel = [&]<typename REAL>() {
+    struct basic_span {
+      REAL *_0;
+      std::size_t _1;
+    };
+
+    REAL *params;
+    std::size_t totalParams;
+
+    // We assume either a span OR a list of REALs, but not both (for now).
+    if (numSpans) {
+      // 1a. A set of basic spans, `{ptr, i64}`. Pop the varargs and build the
+      // spans.
+      if (numSpans != 1)
+        throw std::invalid_argument("Too many spans (> 1), not supported");
+      basic_span *spans =
+          reinterpret_cast<basic_span *>(alloca(numSpans * sizeof(basic_span)));
+      for (std::size_t i = 0; i < numSpans; ++i) {
+        auto *dataPtr = va_arg(args, REAL *);
+        auto dataLen = va_arg(args, std::size_t);
+        spans[i] = basic_span{dataPtr, dataLen};
+      }
+
+      // There can be only one.
+      params = spans[0]._0;
+      totalParams = spans[0]._1;
+    } else {
+      // 1b. A set of parameters. Pop the varargs as REAL values.
+      params = reinterpret_cast<REAL *>(alloca(numParams * sizeof(REAL)));
+      for (std::size_t i = 0; i < numParams; ++i) {
+        auto *dblPtr = va_arg(args, REAL *);
+        params[i] = *dblPtr;
+      }
+
+      totalParams = numParams;
+    }
+
+    // 2. A set of qubits. Pop the varargs as qubit* values.
+    std::vector<Array *> qubits(numTargets);
+    for (std::size_t i = 0; i < numTargets; ++i) {
+      auto *qbPtr = va_arg(args, Array *);
+      qubits[i] = qbPtr;
+    }
+    // There can be only one.
+    Array *asArray = qubits[0];
+
+    if constexpr (std::is_same_v<REAL, float>) {
+      __quantum__qis__apply_kraus_channel_float(krausChannelKey, params,
+                                                totalParams, asArray);
+    } else {
+      __quantum__qis__apply_kraus_channel_double(krausChannelKey, params,
+                                                 totalParams, asArray);
+    }
+  };
+
+  switch (dataKind) {
+  case 0:
+    vapplyKrausChannel.template operator()<float>();
+    break;
+  case 1:
+    vapplyKrausChannel.template operator()<double>();
+    break;
+  default:
+    throw std::runtime_error("apply_noise: unknown data kind.");
+  }
+  va_end(args);
+}
+
+namespace details {
+struct FakeQubit {
+  std::int8_t *id;
+  bool negated;
+};
+static_assert(sizeof(FakeQubit) == sizeof(cudaq::qudit<2>) &&
+              "FakeQubit must have the same memory layout as cudaq::qudit<>");
+} // namespace details
+
+std::vector<details::FakeQubit> *
+__quantum__qis__convert_array_to_stdvector(Array *arr) {
+  const std::size_t size = arr->size();
+  std::vector<details::FakeQubit> *result = new std::vector<details::FakeQubit>;
+  result->reserve(size);
+  for (std::size_t i = 0; i < size; ++i) {
+    (*result)[i].id = (*arr)[i];
+    (*result)[i].negated = false;
+  }
+  return result;
+}
+
+void __quantum__qis__free_converted_stdvector(
+    std::vector<details::FakeQubit> *veq) {
+  delete veq;
+}
+
 void __quantum__qis__custom_unitary(std::complex<double> *unitary,
                                     Array *controls, Array *targets,
                                     const char *name) {
-  auto ctrlsVec = arrayToVectorSizeT(controls);
+  auto ctrlsVec = safeArrayToVectorSizeT(controls);
   auto tgtsVec = arrayToVectorSizeT(targets);
   auto numQubits = tgtsVec.size();
   if (numQubits >= 64)
@@ -629,8 +885,7 @@ void __quantum__qis__custom_unitary(std::complex<double> *unitary,
 void __quantum__qis__custom_unitary__adj(std::complex<double> *unitary,
                                          Array *controls, Array *targets,
                                          const char *name) {
-
-  auto ctrlsVec = arrayToVectorSizeT(controls);
+  auto ctrlsVec = safeArrayToVectorSizeT(controls);
   auto tgtsVec = arrayToVectorSizeT(targets);
   auto numQubits = tgtsVec.size();
   if (numQubits >= 64)
@@ -675,17 +930,17 @@ static std::vector<Pauli> extractPauliTermIds(Array *paulis) {
 /// @param qubits
 /// @return
 Result *__quantum__qis__measure__body(Array *pauli_arr, Array *qubits) {
-  cudaq::info("NVQIR measuring in pauli basis");
+  CUDAQ_INFO("NVQIR measuring in pauli basis");
   ScopedTraceWithContext("NVQIR::observe_measure_body");
 
   auto *circuitSimulator = nvqir::getCircuitSimulatorInternal();
-  auto currentContext = circuitSimulator->getExecutionContext();
+  auto *currentContext = circuitSimulator->getExecutionContext();
 
   // Some backends may better handle the observe task.
   // Let's give them that opportunity.
   if (currentContext->canHandleObserve) {
     circuitSimulator->flushGateQueue();
-    auto result = circuitSimulator->observe(*currentContext->spin.value());
+    auto result = circuitSimulator->observe(currentContext->spin.value());
     currentContext->expectationValue = result.expectation();
     currentContext->result = result.raw_data();
     return ResultZero;
@@ -735,7 +990,7 @@ Result *__quantum__qis__measure__body(Array *pauli_arr, Array *qubits) {
 
   // Reverse the measurements bases change.
   if (!reverser.empty()) {
-    cudaq::info("NVQIR reverse pauli bases change for measurement.");
+    CUDAQ_INFO("NVQIR reverse pauli bases change for measurement.");
     for (auto it = reverser.rbegin(); it != reverser.rend(); ++it) {
       if (it->first == "X") {
         circuitSimulator->h(it->second);
@@ -774,7 +1029,7 @@ void __quantum__qis__exp__body(Array *paulis, double angle, Array *qubits) {
     // do nothing since this is the ID term
     std::string msg = "Applying exp (i theta H), where H is the identity";
     msg += "(warning, no non-identity terms in H. Not applying exp())";
-    cudaq::info(msg.c_str());
+    CUDAQ_INFO(msg.c_str());
     return;
   }
 
@@ -883,29 +1138,6 @@ void __quantum__rt__clear_result_maps() {
   measRes2Val.clear();
 }
 
-/// @brief Utility function used by Quake->QIR to pack a single Qubit pointer
-/// into an Array pointer.
-Array *packSingleQubitInArray(Qubit *q) {
-  auto newArray = std::make_unique<Array>(1, sizeof(std::size_t));
-  auto arrayPtr = (*newArray)[0];
-  *reinterpret_cast<Qubit **>(arrayPtr) = q;
-  nvqir::allocatedArrays.emplace_back(std::move(newArray));
-  return nvqir::allocatedArrays.back().get();
-}
-
-/// @brief Utility function used by Quake->QIR to release any created Array from
-/// Qubit packing after its been used
-void releasePackedQubitArray(Array *a) {
-  auto begin = nvqir::allocatedArrays.begin();
-  auto end = nvqir::allocatedArrays.end();
-  nvqir::allocatedArrays.erase(
-      std::remove_if(
-          begin, end,
-          [&](std::unique_ptr<Array> &array) { return a == array.get(); }),
-      end);
-  return;
-}
-
 /// This is the generalized version of invoke that does not use a va_list
 /// argument. It provides a general interface to allow invoking a general
 /// quantum operation, which may contain some number of rotation arguments
@@ -999,6 +1231,38 @@ static void commonInvokeWithRotationsControlsTargets(
           targets[1]);
     break;
   }
+}
+
+void generalizedInvokeWithRotationsControlsTargets(
+    std::size_t numRotationOperands, std::size_t numControlArrayOperands,
+    std::size_t numControlQubitOperands, std::size_t numTargetOperands,
+    void (*QISFunction)(...), ...) {
+  const std::size_t totalControls =
+      numControlArrayOperands + numControlQubitOperands;
+  double parameters[numRotationOperands];
+  std::size_t arrayAndLength[totalControls];
+  Qubit *controls[totalControls];
+  Qubit *targets[numTargetOperands];
+  std::size_t i;
+  va_list args;
+  va_start(args, QISFunction);
+  for (i = 0; i < numRotationOperands; ++i)
+    parameters[i] = va_arg(args, double);
+  for (i = 0; i < numControlArrayOperands; ++i) {
+    arrayAndLength[i] = va_arg(args, std::size_t);
+    controls[i] = va_arg(args, Qubit *);
+  }
+  for (i = 0; i < numControlQubitOperands; ++i) {
+    arrayAndLength[numControlArrayOperands + i] = 0;
+    controls[numControlArrayOperands + i] = va_arg(args, Qubit *);
+  }
+  for (i = 0; i < numTargetOperands; ++i)
+    targets[i] = va_arg(args, Qubit *);
+  va_end(args);
+
+  commonInvokeWithRotationsControlsTargets(
+      numRotationOperands, parameters, totalControls, arrayAndLength, controls,
+      numTargetOperands, targets, reinterpret_cast<void (*)()>(QISFunction));
 }
 
 /// @brief Utility function used by Quake->QIR to invoke a QIR QIS function

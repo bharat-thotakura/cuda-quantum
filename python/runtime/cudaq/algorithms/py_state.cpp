@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -10,6 +10,7 @@
 #include "common/ArgumentWrapper.h"
 #include "common/Logger.h"
 #include "cudaq/algorithms/get_state.h"
+#include "runtime/cudaq/platform/py_alt_launch_kernel.h"
 #include "utils/OpaqueArguments.h"
 #include "mlir/Bindings/Python/PybindAdaptors.h"
 #include "mlir/CAPI/IR.h"
@@ -33,9 +34,6 @@ std::vector<int> bitStringToIntVec(const std::string &bitString) {
 } // namespace
 
 namespace cudaq {
-
-void pyAltLaunchKernel(const std::string &, MlirModule, OpaqueArguments &,
-                       const std::vector<std::string> &);
 
 cudaq::KernelArgsHolder pyCreateNativeKernel(const std::string &, MlirModule,
                                              cudaq::OpaqueArguments &);
@@ -75,6 +73,7 @@ public:
                           std::size_t size, std::size_t returnOffset)
       : argsData(argsDataToOwn), kernelMod(args.mod) {
     this->kernelName = in_kernelName;
+    this->args = argsData->getArgs();
   }
 
   void execute() const override {
@@ -98,10 +97,6 @@ public:
     }
   }
 
-  std::pair<std::string, std::vector<void *>> getKernelInfo() const override {
-    return {kernelName, argsData->getArgs()};
-  }
-
   std::complex<double> overlap(const cudaq::SimulationState &other) override {
     const auto &otherState =
         dynamic_cast<const PyRemoteSimulationState &>(other);
@@ -120,7 +115,7 @@ public:
     return context.overlapResult.value();
   }
 
-  ~PyRemoteSimulationState() { delete argsData; }
+  virtual ~PyRemoteSimulationState() override { delete argsData; }
 };
 
 /// @brief Run `cudaq::get_state` for remote execution targets on the provided
@@ -139,23 +134,114 @@ state pyGetStateRemote(py::object kernel, py::args args) {
                                            size, returnOffset));
 }
 
+/// @brief Python implementation of the `QPUState`.
+// Note: Python kernel arguments are wrapped hence need to be unwrapped
+// accordingly.
+class PyQPUState : public QPUState {
+  // Holder of args data for clean-up.
+  cudaq::OpaqueArguments *argsData;
+
+public:
+  PyQPUState(const std::string &in_kernelName,
+             cudaq::OpaqueArguments *argsDataToOwn)
+      : argsData(argsDataToOwn) {
+    this->kernelName = in_kernelName;
+    this->args = argsData->getArgs();
+  }
+
+  virtual ~PyQPUState() override { delete argsData; }
+};
+
+/// @brief Run `cudaq::get_state` for qpu targets on the provided
+/// kernel and args
+state pyGetStateQPU(py::object kernel, py::args args) {
+  if (py::hasattr(kernel, "compile"))
+    kernel.attr("compile")();
+
+  auto kernelName = kernel.attr("name").cast<std::string>();
+  args = simplifiedValidateInputArguments(args);
+  auto kernelMod = kernel.attr("module").cast<MlirModule>();
+  auto *argData = toOpaqueArgs(args, kernelMod, kernelName);
+  auto [argWrapper, size, returnOffset] =
+      pyCreateNativeKernel(kernelName, kernelMod, *argData);
+  return state(new PyQPUState(kernelName, argData));
+}
+
 state pyGetStateLibraryMode(py::object kernel, py::args args) {
   return details::extractState([&]() mutable {
     if (0 == args.size())
-      cudaq::invokeKernel(std::forward<py::object>(kernel));
+      kernel();
     else {
       std::vector<py::object> argsData;
       for (size_t i = 0; i < args.size(); i++) {
         py::object arg = args[i];
         argsData.emplace_back(std::forward<py::object>(arg));
       }
-      cudaq::invokeKernel(std::forward<py::object>(kernel), argsData);
+      kernel(std::move(argsData));
     }
   });
 }
 
+static py::buffer_info getCupyBufferInfo(py::buffer cupy_buffer) {
+  // Note: cupy 13.5+ arrays will bind (overload resolution) to a py::buffer
+  // type. However, we cannot access the underlying buffer info via a
+  // `.request()` as it will throw unless that is managed memory. Here, we
+  // retrieve and construct buffer_info from the CuPy array interface.
+
+  if (!py::hasattr(cupy_buffer, "__cuda_array_interface__")) {
+    throw std::runtime_error("Buffer is not a CuPy array");
+  }
+
+  py::dict cupy_array_info = cupy_buffer.attr("__cuda_array_interface__");
+  // Ref: https://numba.readthedocs.io/en/stable/cuda/cuda_array_interface.html
+  // example: {'shape': (2, 2), 'typestr': '<c16', 'descr': [('', '<c16')],
+  // 'stream': 1, 'version': 3, 'strides': None, 'data': (140222144708608,
+  // False)}
+  py::tuple dataInfo = cupy_array_info["data"].cast<py::tuple>();
+  void *dataPtr = (void *)dataInfo[0].cast<int64_t>();
+  const bool readOnly = dataInfo[1].cast<bool>();
+  auto shapeTuple = cupy_array_info["shape"].cast<py::tuple>();
+  std::vector<std::size_t> extents;
+  for (std::size_t i = 0; i < shapeTuple.size(); i++) {
+    extents.push_back(shapeTuple[i].cast<std::size_t>());
+  }
+  const std::string typeStr = cupy_array_info["typestr"].cast<std::string>();
+  if (typeStr != "<c16" && typeStr != "<c8") {
+    throw std::runtime_error("Unsupported typestr in CuPy array: " + typeStr +
+                             ". Supported types are: <c16 and <c8.");
+  }
+
+  const bool isDoublePrecision = typeStr == "<c16";
+
+  auto [dataTypeSize, desc] =
+      !isDoublePrecision
+          ? std::make_tuple(
+                sizeof(std::complex<float>),
+                py::format_descriptor<std::complex<float>>::format())
+          : std::make_tuple(
+                sizeof(std::complex<double>),
+                py::format_descriptor<std::complex<double>>::format());
+
+  std::vector<ssize_t> strides(extents.size(), dataTypeSize);
+  for (size_t i = 1; i < extents.size(); ++i)
+    strides[i] = strides[i - 1] * extents[i - 1];
+
+  return py::buffer_info(dataPtr, dataTypeSize, /*itemsize */
+                         desc, extents.size(),  /* ndim */
+                         extents,               /* shape */
+                         strides,               /* strides */
+                         readOnly               /* readonly */
+  );
+}
+
 /// @brief Bind the get_state cudaq function
 void bindPyState(py::module &mod, LinkedLibraryHolder &holder) {
+  py::enum_<cudaq::InitialState>(mod, "InitialStateType",
+                                 "Enumeration describing the initial state "
+                                 "type to be created in the backend")
+      .value("ZERO", cudaq::InitialState::ZERO)
+      .value("UNIFORM", cudaq::InitialState::UNIFORM)
+      .export_values();
 
   py::class_<SimulationState::Tensor>(
       mod, "Tensor",
@@ -206,8 +292,8 @@ void bindPyState(py::module &mod, LinkedLibraryHolder &holder) {
             dataPtr = reinterpret_cast<void *>(hostData);
           }
           hostDataFromDevice.emplace_back(dataPtr, [](void *data) {
-            cudaq::info("freeing data that was copied from GPU device for "
-                        "compatibility with NumPy");
+            CUDAQ_INFO("freeing data that was copied from GPU device for "
+                       "compatibility with NumPy");
             free(data);
           });
         } else
@@ -258,8 +344,16 @@ void bindPyState(py::module &mod, LinkedLibraryHolder &holder) {
       .def_static(
           "from_data",
           [&](py::buffer data) {
-            // This is by default host data
-            auto info = data.request();
+            const bool isHostData =
+                !py::hasattr(data, "__cuda_array_interface__");
+            // Check that the target is GPU-based, i.e., can handle device
+            // pointer.
+            if (!holder.getTarget().config.GpuRequired && !isHostData)
+              throw std::runtime_error(fmt::format(
+                  "Current target '{}' does not support CuPy arrays.",
+                  holder.getTarget().name));
+
+            auto info = isHostData ? data.request() : getCupyBufferInfo(data);
             if (info.format ==
                 py::format_descriptor<std::complex<float>>::format()) {
               return state::from_data(std::make_pair(
@@ -284,10 +378,20 @@ void bindPyState(py::module &mod, LinkedLibraryHolder &holder) {
           "Return a state from data.")
       .def_static(
           "from_data",
-          [](const std::vector<py::buffer> &tensors) {
+          [&holder](const std::vector<py::buffer> &tensors) {
+            const bool isHostData =
+                tensors.empty() ||
+                !py::hasattr(tensors[0], "__cuda_array_interface__");
+            // Check that the target is GPU-based, i.e., can handle device
+            // pointer.
+            if (!holder.getTarget().config.GpuRequired && !isHostData)
+              throw std::runtime_error(fmt::format(
+                  "Current target '{}' does not support CuPy arrays.",
+                  holder.getTarget().name));
             cudaq::TensorStateData tensorData;
             for (auto &tensor : tensors) {
-              auto info = tensor.request();
+              auto info =
+                  isHostData ? tensor.request() : getCupyBufferInfo(tensor);
               const std::vector<std::size_t> extents(info.shape.begin(),
                                                      info.shape.end());
               tensorData.emplace_back(
@@ -353,6 +457,8 @@ void bindPyState(py::module &mod, LinkedLibraryHolder &holder) {
       .def_static(
           "from_data",
           [&holder](py::object opaqueData) {
+            // Note: This overload is no longer needed from cupy 13.5+ onward.
+            // We can remove it in future releases.
             // Make sure this is a CuPy array
             if (!py::hasattr(opaqueData, "data"))
               throw std::runtime_error(
@@ -548,16 +654,26 @@ index pair.
           "Compute the overlap between the provided :class:`State`'s.")
       .def(
           "overlap",
-          [](state &self, py::buffer &other) {
+          [&holder](state &self, py::buffer &other) {
             if (self.get_num_tensors() != 1)
               throw std::runtime_error("overlap NumPy interop only supported "
                                        "for vector and matrix state data.");
 
-            py::buffer_info info = other.request();
+            const bool isHostData =
+                !py::hasattr(other, "__cuda_array_interface__");
+            // Check that the target is GPU-based, i.e., can handle device
+            // pointer.
+            if (!holder.getTarget().config.GpuRequired && !isHostData)
+              throw std::runtime_error(fmt::format(
+                  "Current target '{}' does not support CuPy arrays.",
+                  holder.getTarget().name));
+            py::buffer_info info =
+                isHostData ? other.request() : getCupyBufferInfo(other);
 
             if (info.shape.size() > 2)
-              throw std::runtime_error("overlap NumPy interop only supported "
-                                       "for vector and matrix state data.");
+              throw std::runtime_error(
+                  "overlap NumPy/CuPy interop only supported "
+                  "for vector and matrix state data.");
 
             // Check that the shapes are compatible
             std::size_t otherNumElements = 1;
@@ -604,6 +720,8 @@ index pair.
       .def(
           "overlap",
           [](state &self, py::object other) {
+            // Note: This overload is no longer needed from cupy 13.5+ onward.
+            // We can remove it in future releases.
             // Make sure this is a CuPy array
             if (!py::hasattr(other, "data"))
               throw std::runtime_error(
@@ -665,11 +783,12 @@ index pair.
   mod.def(
       "get_state",
       [&](py::object kernel, py::args args) {
-        if (holder.getTarget().name == "remote-mqpu" ||
-            holder.getTarget().name == "nvqc")
+        if (holder.getTarget().name == "remote-mqpu")
           return pyGetStateRemote(kernel, args);
         if (holder.getTarget().name == "orca-photonics")
           return pyGetStateLibraryMode(kernel, args);
+        if (cudaq::is_remote_platform() || cudaq::is_emulated_platform())
+          return pyGetStateQPU(kernel, args);
         return pyGetState(kernel, args);
       },
       R"#(Return the :class:`State` of the system after execution of the provided `kernel`.

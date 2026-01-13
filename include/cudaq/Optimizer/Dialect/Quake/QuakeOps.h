@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -68,7 +68,7 @@ void genericOpPrinter(mlir::OpAsmPrinter &_odsPrinter, mlir::Operation *op,
 // Is \p op in the Quake dialect?
 inline bool isQuakeOperation(mlir::Operation *op) {
   if (auto *dialect = op->getDialect())
-    return dialect->getNamespace().equals("quake");
+    return dialect->getNamespace() == "quake";
   return false;
 }
 

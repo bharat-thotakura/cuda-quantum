@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -49,39 +49,54 @@ declare_mlir_python_extension(CUDAQuantumPythonSources.Extension
     ../runtime/common/py_EvolveResult.cpp
     ../runtime/common/py_ObserveResult.cpp
     ../runtime/common/py_SampleResult.cpp
+    ../runtime/common/py_Resources.cpp
     ../runtime/common/py_CustomOpRegistry.cpp
     ../runtime/common/py_AnalogHamiltonian.cpp
     ../runtime/cudaq/algorithms/py_draw.cpp
     ../runtime/cudaq/algorithms/py_observe_async.cpp
     ../runtime/cudaq/algorithms/py_optimizer.cpp
     ../runtime/cudaq/algorithms/py_sample_async.cpp
+    ../runtime/cudaq/algorithms/py_resource_count.cpp
+    ../runtime/cudaq/algorithms/py_run.cpp
     ../runtime/cudaq/algorithms/py_state.cpp
     ../runtime/cudaq/algorithms/py_evolve.cpp
     ../runtime/cudaq/algorithms/py_translate.cpp
+    ../runtime/cudaq/algorithms/py_unitary.cpp
     ../runtime/cudaq/algorithms/py_utils.cpp
     ../runtime/cudaq/algorithms/py_vqe.cpp
     ../runtime/cudaq/platform/JITExecutionCache.cpp
     ../runtime/cudaq/platform/py_alt_launch_kernel.cpp
     ../runtime/cudaq/qis/py_execution_manager.cpp
     ../runtime/cudaq/qis/py_qubit_qis.cpp
-    ../runtime/cudaq/spin/py_matrix.cpp
-    ../runtime/cudaq/spin/py_spin_op.cpp
+    ../runtime/cudaq/operators/py_helpers.cpp  
+    ../runtime/cudaq/operators/py_matrix.cpp
+    ../runtime/cudaq/operators/py_scalar_op.cpp
+    ../runtime/cudaq/operators/py_spin_op.cpp
+    ../runtime/cudaq/operators/py_fermion_op.cpp
+    ../runtime/cudaq/operators/py_boson_op.cpp
+    ../runtime/cudaq/operators/py_matrix_op.cpp
+    ../runtime/cudaq/operators/py_super_op.cpp
+    ../runtime/cudaq/operators/py_handlers.cpp
     ../runtime/cudaq/target/py_runtime_target.cpp
     ../runtime/cudaq/target/py_testing_utils.cpp
     ../runtime/mlir/py_register_dialects.cpp
     ../runtime/utils/PyRemoteRESTQPU.cpp
     ../runtime/utils/PyFermioniqRESTQPU.cpp
-    ../runtime/utils/PyQuEraRemoteRESTQPU.cpp
     ../runtime/utils/PyRemoteSimulatorQPU.cpp
     ../runtime/utils/PyRestRemoteClient.cpp
     ../utils/LinkedLibraryHolder.cpp
     ../../runtime/common/ArgumentConversion.cpp
+    ../../runtime/common/CodeGenConfig.cpp
+    ../../runtime/common/RunTheKernel.cpp
     ../../runtime/cudaq/platform/common/QuantumExecutionQueue.cpp
     ../../runtime/cudaq/platform/default/rest_server/RemoteRuntimeClient.cpp
     ../../runtime/cudaq/platform/orca/OrcaExecutor.cpp
     ../../runtime/cudaq/platform/orca/OrcaQPU.cpp
     ../../runtime/cudaq/platform/orca/OrcaRemoteRESTQPU.cpp
     ../../runtime/cudaq/platform/orca/OrcaServerHelper.cpp
+    ../../runtime/cudaq/platform/pasqal/PasqalRemoteRESTQPU.cpp
+    ../../runtime/cudaq/platform/pasqal/PasqalServerHelper.cpp
+    ../../runtime/cudaq/platform/quera/QuEraRemoteRESTQPU.cpp
 
   EMBED_CAPI_LINK_LIBS
    CUDAQuantumMLIRCAPI

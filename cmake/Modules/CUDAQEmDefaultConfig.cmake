@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -8,8 +8,8 @@
 
 get_filename_component(CUDAQ_EM_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
 
-set (CUDAQSpin_DIR "${CUDAQ_EM_CMAKE_DIR}")
-find_dependency(CUDAQSpin REQUIRED)
+set (CUDAQOperator_DIR "${CUDAQ_EM_CMAKE_DIR}")
+find_dependency(CUDAQOperator REQUIRED)
 
 set (CUDAQCommon_DIR "${CUDAQ_EM_CMAKE_DIR}")
 find_dependency(CUDAQCommon REQUIRED)

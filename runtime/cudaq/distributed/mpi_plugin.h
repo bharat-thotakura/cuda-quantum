@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -16,6 +16,7 @@ class MPIPlugin {
   cudaqDistributedCommunicator_t *m_comm;
   bool m_valid;
   std::string m_libFile;
+  void *m_libhandle = nullptr;
 
 public:
   static constexpr std::string_view COMM_GETTER_SYMBOL_NAME =
@@ -26,6 +27,7 @@ public:
   // inteface library.
   static bool isValidInterfaceLib(const std::string &distributedInterfaceLib);
   MPIPlugin(const std::string &distributedInterfaceLib);
+  ~MPIPlugin();
   cudaqDistributedInterface_t *get() { return m_distributedInterface; }
   cudaqDistributedCommunicator_t *getComm() { return m_comm; }
   std::string getPluginPath() const { return m_libFile; }

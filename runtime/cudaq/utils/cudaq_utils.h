@@ -1,5 +1,5 @@
 /****************************************************************-*- C++ -*-****
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -56,7 +56,6 @@ extern std::string demangle_kernel(const char *);
 } // namespace cudaq::__internal__
 
 namespace cudaq {
-class spin_op;
 class sample_result;
 
 inline static std::string getCUDAQLibraryPath() {
@@ -150,7 +149,9 @@ std::string getKernelName(QuantumKernel &kernel) {
   if constexpr (has_name<QuantumKernel>::value) {
     kernel_name = kernel.name();
   } else {
+#ifndef CUDAQ_RTTI_DISABLED
     kernel_name = __internal__::demangle_kernel(typeid(kernel).name());
+#endif
   }
   return kernel_name;
 }
@@ -261,14 +262,8 @@ std::vector<double> random_vector(const double l_range, const double r_range,
 /// user-specified `start` value. The remaining values are all values
 /// incremented by `step` (defaults to 1) until the `stop` value is reached
 /// (exclusive).
-#if CUDAQ_USE_STD20
 template <typename ElementType>
   requires(std::signed_integral<ElementType>)
-#else
-template <typename ElementType,
-          typename = std::enable_if_t<std::is_integral_v<ElementType> &&
-                                      std::is_signed_v<ElementType>>>
-#endif
 inline std::vector<ElementType> range(ElementType start, ElementType stop,
                                       ElementType step = 1) {
   std::vector<ElementType> vec;
@@ -283,14 +278,8 @@ inline std::vector<ElementType> range(ElementType start, ElementType stop,
 /// @brief Return a vector of integers. The first element is zero, and
 /// the remaining elements are all values incremented by 1 to the total
 /// size value provided (exclusive).
-#if CUDAQ_USE_STD20
 template <typename ElementType>
   requires(std::signed_integral<ElementType>)
-#else
-template <typename ElementType,
-          typename = std::enable_if_t<std::is_integral_v<ElementType> &&
-                                      std::is_signed_v<ElementType>>>
-#endif
 inline std::vector<ElementType> range(ElementType N) {
   return range(ElementType(0), N);
 }

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -39,11 +39,10 @@ struct VerifyNVQIRCallOpsPass
       if (functionName.startswith("__quantum_"))
         return true;
       static const std::vector<llvm::StringRef> NVQIR_FUNCS = {
-          cudaq::opt::NVQIRInvokeWithControlBits,
-          cudaq::opt::NVQIRInvokeRotationWithControlBits,
-          cudaq::opt::NVQIRInvokeWithControlRegisterOrBits,
-          cudaq::opt::NVQIRPackSingleQubitInArray,
-          cudaq::opt::NVQIRReleasePackedQubitArray,
+          cudaq::opt::NVQIRInvokeWithControlBits,           // obsolete
+          cudaq::opt::NVQIRInvokeRotationWithControlBits,   // obsolete
+          cudaq::opt::NVQIRInvokeWithControlRegisterOrBits, // obsolete
+          cudaq::opt::NVQIRGeneralizedInvokeAny,
           cudaq::opt::QIRArrayQubitAllocateArrayWithStateComplex32,
           cudaq::opt::QIRArrayQubitAllocateArrayWithStateComplex64,
           cudaq::getNumQubitsFromCudaqState,
@@ -78,7 +77,8 @@ struct VerifyNVQIRCallOpsPass
         return WalkResult::interrupt();
       } else if (!isa<LLVM::AddressOfOp, LLVM::AllocaOp, LLVM::BitcastOp,
                       LLVM::ExtractValueOp, LLVM::GEPOp, LLVM::InsertValueOp,
-                      LLVM::LoadOp, LLVM::StoreOp>(op)) {
+                      LLVM::IntToPtrOp, LLVM::SelectOp, LLVM::LoadOp,
+                      LLVM::StoreOp>(op)) {
         // No pointers allowed except for the above operations.
         for (auto oper : op->getOperands()) {
           if (isa<LLVM::LLVMPointerType>(oper.getType())) {
