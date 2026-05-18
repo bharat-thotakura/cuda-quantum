@@ -10,54 +10,119 @@
 #include "PassDetails.h"
 #include "cudaq/Frontend/nvqpp/AttributeNames.h"
 #include "cudaq/Optimizer/Builder/Factory.h"
-#include "cudaq/Optimizer/Dialect/CC/CCOps.h"
-#include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 
-#define DEBUG_TYPE "resource-count-preprocess"
-
-using namespace mlir;
-
-//===----------------------------------------------------------------------===//
-// Generated logic
-//===----------------------------------------------------------------------===//
 namespace cudaq::opt {
 #define GEN_PASS_DEF_RESOURCECOUNTPREPROCESS
 #include "cudaq/Optimizer/Transforms/Passes.h.inc"
 } // namespace cudaq::opt
+
+#define DEBUG_TYPE "resource-count-preprocess"
+
+using namespace mlir;
 
 struct ResourceCountPreprocessPass
     : public cudaq::opt::impl::ResourceCountPreprocessBase<
           ResourceCountPreprocessPass> {
   using ResourceCountPreprocessBase::ResourceCountPreprocessBase;
   SetVector<Operation *> to_erase;
+  DenseMap<Value, std::size_t> qubitIndexMap;
+  std::size_t nextQubitIndex = 0;
+
+  /// Assign a base qubit index for a qvector Value. For sized veqs, advances
+  /// nextQubitIndex by the veq size so each qubit gets a unique index. For
+  /// unsized veqs, the base index is shared (nextQubitIndex is not advanced)
+  /// since individual qubits cannot be resolved.
+  std::size_t getVeqBase(Value veq) {
+    auto it = qubitIndexMap.find(veq);
+    if (it != qubitIndexMap.end())
+      return it->second;
+    auto base = nextQubitIndex;
+    if (auto size = cudaq::quake::getVeqSize(veq))
+      nextQubitIndex += *size;
+    qubitIndexMap[veq] = base;
+    return base;
+  }
+
+  /// Resolve a quake value to a globally unique qubit index.
+  std::optional<std::size_t> resolveQubitIndex(Value v) {
+    // extract_ref from a qvector: base offset + local index.
+    if (auto extractRef = v.getDefiningOp<cudaq::quake::ExtractRefOp>())
+      if (extractRef.hasConstantIndex())
+        return getVeqBase(extractRef.getVeq()) + extractRef.getConstantIndex();
+    // Wire semantics: concrete physical index from routing.
+    if (auto borrow = v.getDefiningOp<cudaq::quake::BorrowWireOp>())
+      return static_cast<std::size_t>(borrow.getIdentity());
+    // Single-qubit alloca: assign a unique index by declaration order.
+    if (v.getDefiningOp<cudaq::quake::AllocaOp>() &&
+        isa<cudaq::quake::RefType>(v.getType())) {
+      auto it = qubitIndexMap.find(v);
+      if (it != qubitIndexMap.end())
+        return it->second;
+      auto idx = nextQubitIndex++;
+      qubitIndexMap[v] = idx;
+      return idx;
+    }
+    return std::nullopt;
+  }
 
   bool preCount(Operation *op, size_t to_add) {
     if (!isQuakeOperation(op))
       return false;
 
-    auto opi = dyn_cast<quake::OperatorInterface>(op);
+    auto opi = dyn_cast<cudaq::quake::OperatorInterface>(op);
 
     if (!opi)
       return false;
 
     // Measures may affect control flow, don't remove for now
-    if (isa<quake::MeasurementInterface>(op))
+    if (isa<cudaq::quake::MeasurementInterface>(op))
       return false;
 
     auto name = op->getName().stripDialect();
 
-    size_t controls = opi.getControls().size();
+    std::vector<std::size_t> controlIndices, targetIndices;
+    bool allResolved = true;
+
+    // Resolve qubit indices. Operands may be ref (single qubit) or veq
+    // (e.g. from ConcatOp when Python passes a list of controls).
+    auto resolveOperands = [&](auto operands, std::vector<std::size_t> &out) {
+      for (auto val : operands) {
+        if (auto concat =
+                val.template getDefiningOp<cudaq::quake::ConcatOp>()) {
+          for (auto operand : concat.getTargets()) {
+            if (auto idx = resolveQubitIndex(operand))
+              out.push_back(*idx);
+            else
+              allResolved = false;
+          }
+        } else if (auto idx = resolveQubitIndex(val)) {
+          out.push_back(*idx);
+        } else {
+          allResolved = false;
+        }
+      }
+    };
+    resolveOperands(opi.getControls(), controlIndices);
+    resolveOperands(opi.getTargets(), targetIndices);
+
+    // If not all qubit indices resolved, use operand counts for the gate
+    // classification but skip depth tracking (indices are unreliable).
+    if (!allResolved) {
+      controlIndices.clear();
+      targetIndices.clear();
+    }
 
     if (dumpPreprocessed)
-      llvm::outs() << "Preprocessing " << name << "(" << controls << ")"
+      llvm::outs() << "Preprocessing " << name << "("
+                   << opi.getControls().size() << ")"
                    << " for " << to_add << " counts\n";
 
-    countGate(name.str(), controls, to_add);
+    countGate(name.str(), controlIndices, targetIndices, to_add);
     to_erase.insert(op);
     return true;
   }
@@ -106,5 +171,7 @@ struct ResourceCountPreprocessPass
       op->erase();
 
     to_erase.clear();
+    qubitIndexMap.clear();
+    nextQubitIndex = 0;
   }
 };

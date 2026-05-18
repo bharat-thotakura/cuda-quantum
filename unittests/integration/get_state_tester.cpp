@@ -8,6 +8,7 @@
 
 #include "CUDAQTestUtils.h"
 #include "common/FmtCore.h"
+#include <cmath>
 #include <cudaq/algorithm.h>
 #include <cudaq/optimizers.h>
 #include <numeric>
@@ -166,14 +167,52 @@ CUDAQ_TEST(GetStateTester, checkOverlapFromHostVector) {
   hostState.dump();
   // Check overlap with host vector
   EXPECT_NEAR(1.0, state.overlap(hostState).real(), 1e-3);
+
+  {
+    // More qubits/different amplitudes
+    auto weightedProduct = []() __qpu__ {
+      cudaq::qvector q(3);
+      ry(M_PI / 3.0, q[0]);
+      h(q[1]);
+      x(q[2]);
+    };
+
+    auto weightedState = cudaq::get_state(weightedProduct);
+    std::vector<cudaq::complex> hostStateData(8, 0.0);
+    hostStateData[4] = std::sqrt(3.0) * M_SQRT1_2 / 2.0;
+    hostStateData[5] = M_SQRT1_2 / 2.0;
+    hostStateData[6] = std::sqrt(3.0) * M_SQRT1_2 / 2.0;
+    hostStateData[7] = M_SQRT1_2 / 2.0;
+    // Check overlap with host vector
+    EXPECT_NEAR(1.0, weightedState.overlap(hostStateData).real(), 1e-3);
+  }
+
+  {
+    // State with imaginary amplitudes
+    auto phasedGhz = []() __qpu__ {
+      cudaq::qvector q(4);
+      ry(M_PI / 3.0, q[0]);
+      cx(q[0], q[1]);
+      cx(q[1], q[2]);
+      cx(q[2], q[3]);
+      s(q[3]);
+    };
+
+    auto phasedGhzState = cudaq::get_state(phasedGhz);
+    std::vector<cudaq::complex> hostStateData(16, 0.0);
+    hostStateData[0] = std::sqrt(3.0) / 2.0;
+    hostStateData[15] = cudaq::complex(0.0, 0.5);
+    EXPECT_NEAR(1.0, phasedGhzState.overlap(hostStateData).real(), 1e-3);
+  }
 }
 #endif
 
 CUDAQ_TEST(GetStateTester, checkKron) {
-  auto force_kron = [](std::vector<std::complex<cudaq::real>> vec) __qpu__ {
-    cudaq::qubit a;
-    cudaq::qvector qvec(vec);
-  };
+  auto force_kron = [](const std::vector<std::complex<cudaq::real>> &vec)
+                        __qpu__ {
+                          cudaq::qubit a;
+                          cudaq::qvector qvec(cudaq::state{vec});
+                        };
   // Construct a 6-qubit |111111> state
   const int num_qubits_input_state = 6;
   std::vector<std::complex<cudaq::real>> hostStateData(

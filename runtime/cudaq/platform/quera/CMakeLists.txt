@@ -22,11 +22,12 @@ target_link_libraries(${LIBRARY_NAME}
     cudaq-operator
     cudaq-common 
   PRIVATE
-    pthread
-    cudaq-mlir-runtime 
-    fmt::fmt-header-only
-    cudaq 
-    cudaq-platform-default)
+    cudaq-mlir-runtime
+    cudaq-logger
+    cudaq
+    cudaq-platform-default
+    nvqir
+)
 
 install(TARGETS ${LIBRARY_NAME} DESTINATION lib)
 
@@ -37,6 +38,6 @@ target_link_libraries(cudaq-serverhelper-quera
   PUBLIC 
     cudaq-serverhelper-braket
     cudaq-common 
-    fmt::fmt-header-only 
+    cudaq-logger 
 )
 install(TARGETS cudaq-serverhelper-quera DESTINATION lib)

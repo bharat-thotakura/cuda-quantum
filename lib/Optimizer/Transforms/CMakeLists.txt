@@ -13,11 +13,13 @@ endif()
 add_cudaq_library(OptTransforms
   AddDeallocs.cpp
   AddMeasurements.cpp
+  AddMetadata.cpp
   AggressiveInlining.cpp
   ApplyControlNegations.cpp
   ApplyOpSpecialization.cpp
   ArgumentSynthesis.cpp
   BasisConversion.cpp
+  CableRoughIn.cpp
   ClassicalOptimization.cpp
   CombineMeasurements.cpp
   CombineQuantumAlloc.cpp
@@ -26,8 +28,7 @@ add_cudaq_library(OptTransforms
   Decomposition.cpp
   DecompositionPatterns.cpp
   DecompositionPatternSelection.cpp
-  DelayMeasurements.cpp
-  DeleteStates.cpp
+  DesugarCableOps.cpp
   DistributedDeviceCall.cpp
   EraseNoise.cpp
   EraseNopCalls.cpp
@@ -57,7 +58,6 @@ add_cudaq_library(OptTransforms
   Pipelines.cpp
   PruneCtrlRelations.cpp
   PySynthCallableBlockArgs.cpp
-  QuakeAddMetadata.cpp
   QuakePropagateMetadata.cpp
   QuakeSimplify.cpp
   QuakeSynthesizer.cpp
@@ -65,7 +65,9 @@ add_cudaq_library(OptTransforms
   RegToMem.cpp
   ReplaceStateWithKernel.cpp
   ResetBeforeReuse.cpp
+  ResourceCount.cpp
   ResourceCountPreprocess.cpp
+  RunSemanticsHackery.cpp
   SROA.cpp
   StackFramePrealloc.cpp
   StatePreparation.cpp

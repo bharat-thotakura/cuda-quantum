@@ -38,7 +38,7 @@ target_include_directories(OptimizerUnitTests
 # to avoid linker errors (undefined typeinfo for base classes)
 target_compile_options(OptimizerUnitTests PRIVATE -fno-rtti)
 
-gtest_discover_tests(OptimizerUnitTests)
+gtest_discover_tests(OptimizerUnitTests DISCOVERY_TIMEOUT 120)
 
 add_executable(test_quake_synth QuakeSynthTester.cpp)
 target_link_libraries(test_quake_synth
@@ -54,6 +54,6 @@ target_link_libraries(test_quake_synth
   cudaq-em-default
   gtest_main)
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
-  target_link_options(test_quake_synth PRIVATE -Wl,--no-as-needed)
+  target_link_options(test_quake_synth PRIVATE ${CUDAQ_FORCE_LINK_FLAG})
 endif()
-gtest_discover_tests(test_quake_synth)
+gtest_discover_tests(test_quake_synth DISCOVERY_TIMEOUT 120)

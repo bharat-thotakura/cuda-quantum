@@ -9,6 +9,7 @@
 #include "cudaq/Optimizer/Dialect/CC/CCTypes.h"
 #include "cudaq/Optimizer/Dialect/CC/CCDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -85,31 +86,23 @@ void cc::StructType::print(AsmPrinter &printer) const {
   printer << '>';
 }
 
-unsigned
+llvm::TypeSize
 cc::StructType::getTypeSizeInBits(const DataLayout &dataLayout,
                                   DataLayoutEntryListRef params) const {
-  return static_cast<unsigned>(getBitSize());
+  return llvm::TypeSize::getFixed(getBitSize());
 }
 
-unsigned cc::StructType::getABIAlignment(const DataLayout &dataLayout,
+uint64_t cc::StructType::getABIAlignment(const DataLayout &dataLayout,
                                          DataLayoutEntryListRef params) const {
-  return getAlignment();
-}
-
-unsigned
-cc::StructType::getPreferredAlignment(const DataLayout &dataLayout,
-                                      DataLayoutEntryListRef params) const {
-  // No distinction between ABI and preferred alignments for now. Clang just
-  // gives us an alignment value.
   return getAlignment();
 }
 
 LogicalResult
 cc::StructType::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
                        mlir::StringAttr, llvm::ArrayRef<mlir::Type> members,
-                       bool, bool, unsigned long, unsigned int) {
+                       bool, bool, std::uint64_t, unsigned int) {
   for (auto ty : members)
-    if (quake::isQuantumType(ty))
+    if (cudaq::quake::isQuantumType(ty))
       return emitError() << "cc.struct may not contain quake types: " << ty;
   return success();
 }
@@ -152,8 +145,8 @@ void cc::ArrayType::print(AsmPrinter &printer) const {
 
 LogicalResult
 cc::ArrayType::verify(function_ref<InFlightDiagnostic()> emitError, Type eleTy,
-                      long) {
-  if (quake::isQuantumType(eleTy))
+                      std::int64_t) {
+  if (cudaq::quake::isQuantumType(eleTy))
     return emitError() << "cc.array may not have a quake element type: "
                        << eleTy;
   return success();
@@ -162,7 +155,7 @@ cc::ArrayType::verify(function_ref<InFlightDiagnostic()> emitError, Type eleTy,
 LogicalResult
 cc::StdvecType::verify(function_ref<InFlightDiagnostic()> emitError,
                        Type eleTy) {
-  if (quake::isQuantumType(eleTy))
+  if (cudaq::quake::isQuantumType(eleTy))
     return emitError() << "cc.stdvec may not have a quake element type: "
                        << eleTy;
   return success();
@@ -229,13 +222,40 @@ bool isDynamicallySizedType(Type ty) {
   return false;
 }
 
-CallableType CallableType::getNoSignature(MLIRContext *ctx) {
-  return CallableType::get(ctx, FunctionType::get(ctx, {}, {}));
+static bool containsMeasureHandleImpl(Type ty,
+                                      llvm::SmallPtrSetImpl<Type> &seen) {
+  if (!ty || !seen.insert(ty).second)
+    return false;
+  if (isa<MeasureHandleType>(ty))
+    return true;
+  auto recurse = [&](Type t) { return containsMeasureHandleImpl(t, seen); };
+  if (auto p = dyn_cast<PointerType>(ty))
+    return recurse(p.getElementType());
+  if (auto a = dyn_cast<ArrayType>(ty))
+    return recurse(a.getElementType());
+  if (auto v = dyn_cast<StdvecType>(ty))
+    return recurse(v.getElementType());
+  if (auto s = dyn_cast<StructType>(ty)) {
+    for (auto m : s.getMembers())
+      if (recurse(m))
+        return true;
+    return false;
+  }
+  // Callable / function types are a type contract for a device-side body, not
+  // a slot for a handle value: the host marshals only the function-pointer
+  // payload, and any handle that the callable produces or consumes lives on
+  // the device side. Stop the walk here.
+  return false;
+}
+
+bool containsMeasureHandle(Type ty) {
+  llvm::SmallPtrSet<Type, 8> seen;
+  return containsMeasureHandleImpl(ty, seen);
 }
 
 void CCDialect::registerTypes() {
   addTypes<ArrayType, CallableType, CharspanType, IndirectCallableType,
-           PointerType, StdvecType, StructType>();
+           MeasureHandleType, PointerType, StdvecType, StructType>();
 }
 
 } // namespace cudaq::cc

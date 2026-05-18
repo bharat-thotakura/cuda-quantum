@@ -13,6 +13,10 @@
 /// particular quantum target representation. There is a bevy of such targets
 /// that provide platforms on which the quantum code can be run.
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Complex/IR/Complex.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -35,16 +39,9 @@ namespace cudaq::opt {
 /// \deprecated Replaced by the convert to QIR API pipeline.
 void addQIRProfilePipeline(mlir::OpPassManager &pm, llvm::StringRef convertTo);
 
-void addQIRProfileVerify(mlir::OpPassManager &pm, llvm::StringRef convertTo);
-
 void addLowerToCCPipeline(mlir::OpPassManager &pm);
 void addWiresetToProfileQIRPipeline(mlir::OpPassManager &pm,
                                     llvm::StringRef profile);
-
-/// Verify that all `CallOp` targets are QIR- or NVQIR-defined functions or in
-/// the provided allowed list.
-std::unique_ptr<mlir::Pass>
-createVerifyNVQIRCallOpsPass(const std::vector<llvm::StringRef> &allowedFuncs);
 
 // Use the addQIRProfilePipeline() for the following passes.
 std::unique_ptr<mlir::Pass>
@@ -67,10 +64,10 @@ mlir::LLVM::LLVMStructType lambdaAsPairOfPointers(mlir::MLIRContext *context);
 /// before conversion to the LLVM-IR dialect.
 void registerToQIRAPIPipeline();
 
-/// Add the convert to QIR API pipeline to \p pm. We don't use opaque pointers
-/// yet, so provide a convenient overload.
+/// Add the convert to QIR API pipeline to \p pm. With the move to LLVM 22, we
+/// now use opaque pointers.
 void addConvertToQIRAPIPipeline(mlir::OpPassManager &pm, mlir::StringRef api,
-                                bool opaquePtr = false);
+                                bool opaquePtr = true);
 
 /// The pipeline for lowering Quake code to the execution manager API. This
 /// pipeline should be run before conversion to the LLVM-IR dialect.
@@ -107,6 +104,14 @@ void addPipelineTranslateToOpenQASM(mlir::PassManager &pm);
 
 /// Pipeline builder to convert Quake to IQM `Json`.
 void addPipelineTranslateToIQMJson(mlir::PassManager &pm);
+
+/// This pipeline specifies some extra bonus passes that are needed to lower
+/// Python kernel decorators to `Open QASM` format. While this pipeline is
+/// almost exclusively Quake transformations, there is one pass
+/// (`createQaukeToCCPrep`) that uses patterns from here in `codegen`. Therefore
+/// this pipeline is defined in `codegen` to avoid circular dependences. (Note:
+/// this pipeline is not registered.)
+void createPipelineTransformsForPythonToOpenQASM(mlir::OpPassManager &pm);
 
 // declarative passes
 #define GEN_PASS_DECL

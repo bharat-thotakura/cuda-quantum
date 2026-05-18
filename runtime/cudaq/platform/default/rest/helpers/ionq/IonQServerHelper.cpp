@@ -5,11 +5,12 @@
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
-#include "common/Logger.h"
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
 #include "cudaq/Support/Version.h"
+#include "cudaq/runtime/logger/logger.h"
 #include "cudaq/utils/cudaq_utils.h"
+#include "nlohmann/json.hpp"
 #include <bitset>
 #include <fstream>
 #include <map>

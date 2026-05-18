@@ -11,13 +11,7 @@
 #include "common/ExecutionContext.h"
 #include "common/Resources.h"
 #include "cudaq/platform.h"
-
-namespace nvqir {
-void switchToResourceCounterSimulator();
-void stopUsingResourceCounterSimulator();
-void setChoiceFunction(std::function<bool()> choice);
-cudaq::Resources *getResourceCounts();
-} // namespace nvqir
+#include "nvqir/resourcecounter/ResourceCounterScope.h"
 
 namespace cudaq {
 namespace details {
@@ -31,30 +25,18 @@ Resources run_estimate_resources(KernelFunctor &&wrappedKernel,
                                  const std::string &kernelName,
                                  std::function<bool()> choice) {
   // Create the execution context.
-  auto ctx = std::make_unique<ExecutionContext>("resource-count", 1);
-  ctx->kernelName = kernelName;
+  ExecutionContext ctx("resource-count", 1);
+  ctx.kernelName = kernelName;
 
   // Indicate that this is not an async exec
-  ctx->asyncExec = false;
+  ctx.asyncExec = false;
 
-  // Use the resource counter simulator
-  nvqir::switchToResourceCounterSimulator();
-  // Set the choice function for the simulator
-  nvqir::setChoiceFunction(choice);
-
-  // Set the platform
-  platform.set_exec_ctx(ctx.get());
-
-  wrappedKernel();
-
-  platform.reset_exec_ctx();
-
-  // Save and clone counts data
-  auto counts = Resources(*nvqir::getResourceCounts());
-  // Switch simulators back
-  nvqir::stopUsingResourceCounterSimulator();
-
-  return counts;
+  // RAII: scope is released (and the resource-counter state cleared) on
+  // every exit path, including exceptions thrown from the kernel.
+  auto rcScope = nvqir::resource_counter::make_scope(std::move(choice));
+  platform.with_execution_context(ctx,
+                                  std::forward<KernelFunctor>(wrappedKernel));
+  return nvqir::resource_counter::get_counts(rcScope);
 }
 } // namespace details
 

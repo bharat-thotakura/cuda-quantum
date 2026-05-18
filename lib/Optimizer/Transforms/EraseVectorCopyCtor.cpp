@@ -32,11 +32,11 @@ struct PatternAnalysis {
 // Transformation is:
 //
 //  %36 = func.call @malloc(%35) : (i64) -> !cc.ptr<i8>
-//  func.call @llvm.memcpy.p0i8.p0i8.i64(%36, %34, %35, %false) :
+//  func.call @llvm.memcpy.p0.p0.i64(%36, %34, %35, %false) :
 //      (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
 //  %37 = cc.alloca i8[%35 : i64]
 //  %38 = cc.cast %37 : (!cc.ptr<!cc.array<i8 x ?>>) -> !cc.ptr<i8>
-//  func.call @llvm.memcpy.p0i8.p0i8.i64(%38, %36, %35, %false) :
+//  func.call @llvm.memcpy.p0.p0.i64(%38, %36, %35, %false) :
 //      (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
 //  func.call @free(%36) : (!cc.ptr<i8>) -> ()
 //  ───────────────────────────────────────────────────────────────
@@ -59,8 +59,26 @@ public:
     auto newStackSlot = casted.getValue().getDefiningOp<cudaq::cc::AllocaOp>();
     if (!newStackSlot)
       return failure();
-    rewriter.replaceOpWithNewOp<cudaq::cc::CastOp>(
-        newStackSlot, newStackSlot.getType(), analysis.copyFrom.getOperand(1));
+    auto source =
+        analysis.copyFrom.getOperand(1).getDefiningOp<cudaq::cc::CastOp>();
+    if (!source)
+      return failure();
+    auto globalConst =
+        source.getValue().getDefiningOp<cudaq::cc::AddressOfOp>();
+    if (globalConst) {
+      auto ip = rewriter.saveInsertionPoint();
+      rewriter.setInsertionPointAfter(analysis.copyFrom);
+      auto loaded = cudaq::cc::LoadOp::create(
+          rewriter, analysis.copyFrom.getLoc(), globalConst);
+      rewriter.setInsertionPointAfter(analysis.copyTo);
+      cudaq::cc::StoreOp::create(rewriter, analysis.copyTo.getLoc(), loaded,
+                                 newStackSlot);
+      rewriter.restoreInsertionPoint(ip);
+    } else {
+      rewriter.replaceOpWithNewOp<cudaq::cc::CastOp>(
+          newStackSlot, newStackSlot.getType(),
+          analysis.copyFrom.getOperand(1));
+    }
     rewriter.eraseOp(analysis.copyFrom);
     rewriter.eraseOp(analysis.copyTo);
     rewriter.eraseOp(analysis.freeMem);
@@ -108,7 +126,7 @@ public:
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     patterns.insert<EraseVectorCopyCtorPattern>(ctx);
-    if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns))))
+    if (failed(applyPatternsGreedily(op, std::move(patterns))))
       signalPassFailure();
     LLVM_DEBUG(llvm::dbgs() << "After erasure:\n" << *op << "\n\n");
   }

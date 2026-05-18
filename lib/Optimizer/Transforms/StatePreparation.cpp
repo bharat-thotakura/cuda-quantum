@@ -8,13 +8,9 @@
 
 #include "PassDetails.h"
 #include "cudaq/Optimizer/Builder/Factory.h"
-#include "cudaq/Optimizer/Dialect/CC/CCOps.h"
-#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
@@ -79,9 +75,9 @@ std::vector<std::size_t> getControlIndices(std::size_t numBits) {
 std::vector<double> convertAngles(const std::span<double> alphas) {
   // Implements Eq. (3) from https://arxiv.org/pdf/quant-ph/0407010.pdf
   //
-  // N.B: The paper does fails to explicitly define what is the dot operator in
-  // the exponent of -1. Ref. 3 solves the mystery: its the bitwise inner
-  // product.
+  // N.B: The paper fails to explicitly define what is the dot operator in
+  // the exponent of -1. https://arxiv.org/abs/quant-ph/0404089 (Eq. 5) solves
+  // the mystery: its the bitwise inner product.
   auto bitwiseInnerProduct = [](std::size_t a, std::size_t b) {
     auto product = a & b;
     auto sumOfProducts = 0;
@@ -142,7 +138,13 @@ std::vector<double> getAlphaY(const std::span<double> data,
       angles.push_back(0.0);
       continue;
     }
-    angles.push_back(2.0 * std::asin(std::sqrt(numerator / denominator)));
+
+    double ratio = numerator / denominator;
+    ratio = std::min(
+        1.0,
+        std::max(0.0, ratio)); // Clamp ratio to [0, 1] to avoid std::asin
+                               // errors due to floating-point inaccuracies.
+    angles.push_back(2.0 * std::asin(std::sqrt(ratio)));
   }
   return angles;
 }
@@ -157,13 +159,13 @@ public:
   void applyRotationOp(double theta, std::size_t target) {
     auto qubit = createQubitRef(target);
     auto thetaValue = createAngleValue(theta);
-    rewriter.create<Op>(loc, thetaValue, mlir::ValueRange{}, qubit);
+    Op::create(rewriter, loc, thetaValue, mlir::ValueRange{}, qubit);
   };
 
   void applyX(std::size_t control, std::size_t target) {
     auto qubitC = createQubitRef(control);
     auto qubitT = createQubitRef(target);
-    rewriter.create<quake::XOp>(loc, qubitC, qubitT);
+    cudaq::quake::XOp::create(rewriter, loc, qubitC, qubitT);
   };
 
 private:
@@ -171,14 +173,14 @@ private:
     if (qubitRefs.contains(index))
       return qubitRefs[index];
 
-    auto ref = rewriter.create<quake::ExtractRefOp>(loc, qubits, index);
+    auto ref = cudaq::quake::ExtractRefOp::create(rewriter, loc, qubits, index);
     qubitRefs[index] = ref;
     return ref;
   }
 
   mlir::Value createAngleValue(double angle) {
-    return rewriter.create<mlir::arith::ConstantFloatOp>(
-        loc, llvm::APFloat{angle}, rewriter.getF64Type());
+    return arith::ConstantFloatOp::create(rewriter, loc, rewriter.getF64Type(),
+                                          llvm::APFloat{angle});
   }
 
   PatternRewriter &rewriter;
@@ -195,6 +197,24 @@ public:
                   double t)
       : builder(b), amplitudes(a), numQubits(log2(a.size())),
         phaseThreshold(t) {}
+
+  template <typename Op,
+            std::enable_if_t<std::is_same<Op, cudaq::quake::RyOp>::value ||
+                                 std::is_same<Op, cudaq::quake::RzOp>::value,
+                             int> = 0>
+  void applyUniformlyControlledRotation(size_t numQubits,
+                                        const std::span<double> angles) {
+    // Apply uniformly controlled y/z-rotations, the construction in Eq. (4).
+    for (std::size_t j = 1; j <= numQubits; ++j) {
+      auto k = numQubits - j + 1;
+      auto numControls = j - 1;
+      auto target = j - 1;
+      auto alphaK = std::same_as<Op, cudaq::quake::RyOp>
+                        ? cudaq::details::getAlphaY(angles, numQubits, k)
+                        : cudaq::details::getAlphaZ(angles, numQubits, k);
+      applyRotation<Op>(alphaK, numControls, target);
+    }
+  }
 
   /// @brief Decompose the input state vector data to a set of controlled
   /// operations and rotations. This function takes as input a `OpBuilder`
@@ -218,28 +238,16 @@ public:
     // this implementation do the two steps described in Section III in reverse
     // order.
 
-    // Apply uniformly controlled y-rotations, the construction in Eq. (4).
-    for (std::size_t j = 1; j <= numQubits; ++j) {
-      auto k = numQubits - j + 1;
-      auto numControls = j - 1;
-      auto target = j - 1;
-      auto alphaYk = cudaq::details::getAlphaY(magnitudes, numQubits, k);
-      applyRotation<quake::RyOp>(alphaYk, numControls, target);
-    }
+    // Apply uniformly controlled y-rotations (for magnitudes), the construction
+    // in Eq. (4).
+    applyUniformlyControlledRotation<cudaq::quake::RyOp>(numQubits, magnitudes);
 
     if (!needsPhaseEqualization)
       return;
 
-    // Apply uniformly controlled z-rotations, the construction in Eq. (4).
-    for (std::size_t j = 1; j <= numQubits; ++j) {
-      auto k = numQubits - j + 1;
-      auto numControls = j - 1;
-      auto target = j - 1;
-      auto alphaZk = cudaq::details::getAlphaZ(phases, numQubits, k);
-      if (alphaZk.empty())
-        continue;
-      applyRotation<quake::RzOp>(alphaZk, numControls, target);
-    }
+    // Apply uniformly controlled z-rotations (for phases), the construction in
+    // Eq. (4).
+    applyUniformlyControlledRotation<cudaq::quake::RzOp>(numQubits, phases);
   }
 
 private:
@@ -316,52 +324,115 @@ namespace {
 ///   }
 /// }
 /// ```
-class StatePrepPattern : public OpRewritePattern<quake::InitializeStateOp> {
+class StatePrepPattern
+    : public OpRewritePattern<cudaq::quake::InitializeStateOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
 
   explicit StatePrepPattern(MLIRContext *ctx, double phaseThreshold)
       : OpRewritePattern(ctx), phaseThreshold(phaseThreshold) {}
 
-  LogicalResult matchAndRewrite(quake::InitializeStateOp init,
+  LogicalResult matchAndRewrite(cudaq::quake::InitializeStateOp init,
                                 PatternRewriter &rewriter) const override {
     auto loc = init.getLoc();
     auto qubits = init.getTargets();
-    if (auto alloc = qubits.getDefiningOp<quake::AllocaOp>()) {
+    auto alloc = qubits.getDefiningOp<cudaq::quake::AllocaOp>();
+    if (!alloc)
+      return init.emitOpError("failed to replace op (alloca expected)");
 
-      // Find vector data.
-      Value data = init.getState();
-      if (auto cast = data.getDefiningOp<cudaq::cc::CastOp>())
-        data = cast.getValue();
+    // Find vector data.
+    Value data = init.getState();
 
-      if (auto addr = data.getDefiningOp<cudaq::cc::AddressOfOp>()) {
-        auto globalName = addr.getGlobalName();
-        auto module = init->getParentOfType<mlir::ModuleOp>();
-        auto symbol = module.lookupSymbol(globalName);
-        if (auto global = dyn_cast<cudaq::cc::GlobalOp>(symbol)) {
+    // Check that this is a state pointer coming from an argument.
+    auto createState = data.getDefiningOp<cudaq::quake::CreateStateOp>();
+    if (!createState)
+      return init.emitOpError("cannot perform state preparation synthesis on "
+                              "arguments to the kernel");
+    data = createState.getData();
+    if (auto cast = data.getDefiningOp<cudaq::cc::CastOp>())
+      data = cast.getValue();
 
-          // Read state initialization data from the global array.
-          auto vec = cudaq::opt::factory::readGlobalConstantArray(global);
+    auto addr = data.getDefiningOp<cudaq::cc::AddressOfOp>();
+    if (!addr)
+      return init.emitOpError("failed to replace op (address_of expected)");
 
-          // Prepare state from vector data.
-          auto gateBuilder = StateGateBuilder(rewriter, loc, qubits);
-          auto decomposer = StateDecomposer(gateBuilder, vec, phaseThreshold);
-          decomposer.decompose();
+    auto globalName = addr.getGlobalName();
+    auto module = init->getParentOfType<mlir::ModuleOp>();
+    auto symbol = module.lookupSymbol(globalName);
+    auto global = dyn_cast<cudaq::cc::GlobalOp>(symbol);
+    if (!global)
+      return init.emitOpError("failed to replace op (global expected)");
 
-          // Use prepared qubits instead of the initialized state.
-          init.replaceAllUsesWith(qubits);
+    // Read state initialization data from the global array.
+    auto vec = cudaq::opt::factory::readGlobalConstantArray(global);
 
-          // Erase the init so we don't try to replace it again.
-          rewriter.eraseOp(init);
-          return success();
-        }
-      }
-    }
-    return init.emitOpError("failed to replace op");
+    if (vec.empty())
+      return init.emitOpError("Invalid initialization data for state "
+                              "preparation: empty array.");
+    const int64_t vecSize = vec.size();
+    // Check that the size of the vector is a power of two.
+    if ((vecSize & (vecSize - 1)) != 0)
+      return init.emitOpError(
+          "Invalid initialization data for state preparation: size "
+          "must be a power of two.");
+
+    // Prepare state from vector data.
+    auto gateBuilder = StateGateBuilder(rewriter, loc, qubits);
+    auto decomposer = StateDecomposer(gateBuilder, vec, phaseThreshold);
+    decomposer.decompose();
+
+    // Use prepared qubits instead of the initialized state.
+    init.replaceAllUsesWith(qubits);
+
+    // Erase the init so we don't try to replace it again.
+    rewriter.eraseOp(init);
+    return success();
   }
 
 private:
   double phaseThreshold;
+};
+
+class FoldQubitsPattern
+    : public OpRewritePattern<cudaq::quake::GetNumberOfQubitsOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(cudaq::quake::GetNumberOfQubitsOp getnum,
+                                PatternRewriter &rewriter) const override {
+    auto create =
+        getnum.getState().getDefiningOp<cudaq::quake::CreateStateOp>();
+    if (!create)
+      return failure();
+    auto len = cudaq::opt::factory::maybeValueOfIntConstant(create.getLength());
+    if (!len)
+      return failure();
+    // Verify this is a power of 2.
+    if (*len & (*len - 1))
+      return failure();
+    // Translate the length to number of qubits: log2(len)
+    std::size_t num = std::countr_zero(*len);
+    rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(getnum, num, 64);
+    return success();
+  }
+};
+
+class KillDeleteStatePattern
+    : public OpRewritePattern<cudaq::quake::DeleteStateOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(cudaq::quake::DeleteStateOp delstate,
+                                PatternRewriter &rewriter) const override {
+    auto create =
+        delstate.getState().getDefiningOp<cudaq::quake::CreateStateOp>();
+    if (!create)
+      return failure();
+    if (!create->hasOneUse())
+      return failure();
+    rewriter.eraseOp(delstate);
+    return success();
+  }
 };
 
 class StatePreparationPass
@@ -379,8 +450,9 @@ public:
 
     RewritePatternSet patterns(ctx);
     patterns.insert<StatePrepPattern>(ctx, phaseThreshold);
+    patterns.insert<FoldQubitsPattern, KillDeleteStatePattern>(ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(func, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(func, std::move(patterns)))) {
       func.emitOpError("State preparation failed");
       signalPassFailure();
     }

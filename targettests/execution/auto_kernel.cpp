@@ -10,11 +10,6 @@
 
 #include <cudaq.h>
 
-// CHECK: size 3
-// CHECK: 0: {{[tf]}}
-// CHECK: 1: {{[tf]}}
-// CHECK: 2: {{[tf]}}
-
 struct ak2 {
   auto operator()() __qpu__ {
     cudaq::qarray<3> q;
@@ -25,7 +20,7 @@ struct ak2 {
     h(q[0]);
     x(q[1]);
     y(q[2]);
-    return mz(q);
+    return cudaq::to_bools(mz(q));
   }
 };
 
@@ -38,3 +33,8 @@ int main() {
   }
   return 0;
 }
+
+// CHECK: size 3
+// CHECK: 0: {{[tf]}}
+// CHECK: 1: {{[tf]}}
+// CHECK: 2: {{[tf]}}

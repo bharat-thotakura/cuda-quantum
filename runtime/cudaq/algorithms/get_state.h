@@ -17,7 +17,6 @@
 #include "cudaq/platform/qpu_state.h"
 #include "cudaq/qis/kernel_utils.h"
 #include "cudaq/qis/qkernel.h"
-#include "cudaq/qis/remote_state.h"
 #include "cudaq/qis/state.h"
 #include <complex>
 #include <vector>
@@ -42,21 +41,11 @@ state extractState(KernelFunctor &&kernel) {
   // This can only be done in simulation
   if (!platform.is_simulator())
     throw std::runtime_error("Cannot use get_state on a physical QPU.");
-  // Save the outer execution context (if any) so we can restore it after.
-  auto *outerContext = platform.get_exec_ctx();
   // Create an execution context, indicate this is for
   // extracting the state representation
   ExecutionContext context("extract-state");
 
-  // Perform the usual pattern set the context,
-  // execute and then reset
-  platform.set_exec_ctx(&context);
-  kernel();
-  platform.reset_exec_ctx();
-
-  // Restore the outer context if there was one.
-  if (outerContext)
-    platform.set_exec_ctx(outerContext);
+  platform.with_execution_context(context, std::forward<KernelFunctor>(kernel));
 
   // Return the state data. Since the ExecutionContext
   // is done being used, we'll move the simulation state
@@ -90,9 +79,8 @@ auto runGetStateAsync(KernelFunctor &&wrappedKernel,
         context.asyncExec = true;
         context.qpuId = qpu_id;
         // Set the platform and the qpu id.
-        platform.set_exec_ctx(&context);
-        func();
-        platform.reset_exec_ctx();
+        platform.with_execution_context(context,
+                                        std::forward<KernelFunctor>(func));
         // Extract state data
         p.set_value(state(context.simulationState.release()));
       });
@@ -107,41 +95,24 @@ auto runGetStateAsync(KernelFunctor &&wrappedKernel,
 /// runtime arguments.
 template <typename QuantumKernel, typename... Args>
 auto get_state(QuantumKernel &&kernel, Args &&...args) {
-#if defined(CUDAQ_REMOTE_SIM) && !defined(CUDAQ_LIBRARY_MODE)
-  // If this is a kernel that we cannot retrieve a name at runtime (C-type
-  // function), we cannot use lazy evaluation since the kernel name/quake code
-  // is not retrievable. This needs to be directed to the `altLaunchKernel`
-  // function, whereby the bridge has generated code to construct the kernel
-  // name at runtime.
-  if (cudaq::get_quake_by_name(cudaq::getKernelName(kernel), false).empty())
-    return details::extractState(
-        [&]() mutable { kernel(std::forward<Args>(args)...); });
-
-  return state(new RemoteSimulationState(std::forward<QuantumKernel>(kernel),
-                                         std::forward<Args>(args)...));
-#else
-#if defined(CUDAQ_REMOTE_SIM)
-  // Kernel builder is MLIR-based kernel.
-  if constexpr (has_name<QuantumKernel>::value) {
-    return state(new RemoteSimulationState(std::forward<QuantumKernel>(kernel),
-                                           std::forward<Args>(args)...));
-  }
-#elif defined(CUDAQ_QUANTUM_DEVICE) && !defined(CUDAQ_LIBRARY_MODE)
+#if defined(CUDAQ_QUANTUM_DEVICE) && !defined(CUDAQ_LIBRARY_MODE)
   // Store kernel name and arguments for quantum states.
-  return state(
-      new QPUState(details::getKernelName(std::forward<QuantumKernel>(kernel)),
-                   std::forward<Args>(args)...));
+  const auto kernelName =
+      details::getKernelName(std::forward<QuantumKernel>(kernel));
+  return state(new QPUState(kernelName, cudaq::get_quake_by_name(kernelName),
+                            std::forward<Args>(args)...));
 
 #elif defined(CUDAQ_QUANTUM_DEVICE)
   // Kernel builder is MLIR-based kernel.
-  if constexpr (has_name<QuantumKernel>::value)
-    return state(new QPUState(
-        details::getKernelName(std::forward<QuantumKernel>(kernel)),
-        std::forward<Args>(args)...));
-
+  if constexpr (has_name<QuantumKernel>::value) {
+    const auto kernelName =
+        details::getKernelName(std::forward<QuantumKernel>(kernel));
+    return state(new QPUState(kernelName, cudaq::get_quake_by_name(kernelName),
+                              std::forward<Args>(args)...));
+  }
   throw std::runtime_error(
       "could not create state in library mode for quantum devices");
-#endif
+#else
   return details::extractState(
       [&]() mutable { kernel(std::forward<Args>(args)...); });
 #endif
@@ -186,8 +157,12 @@ async_state_result get_state_async(QuantumKernel &&kernel, Args &&...args) {
 
 extern "C" {
 std::int64_t __nvqpp_cudaq_state_numberOfQubits(state *);
-state *__nvqpp_cudaq_state_createFromData_fp64(void *, std::size_t);
-state *__nvqpp_cudaq_state_createFromData_fp32(void *, std::size_t);
+state *__nvqpp_cudaq_state_createFromData_f64(double *, std::size_t);
+state *__nvqpp_cudaq_state_createFromData_f32(float *, std::size_t);
+state *__nvqpp_cudaq_state_createFromData_complex_f64(std::complex<double> *,
+                                                      std::size_t);
+state *__nvqpp_cudaq_state_createFromData_complex_f32(std::complex<float> *,
+                                                      std::size_t);
 void __nvqpp_cudaq_state_delete(state *);
 }
 

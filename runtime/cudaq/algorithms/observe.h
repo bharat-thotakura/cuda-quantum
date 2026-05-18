@@ -11,9 +11,11 @@
 #include "common/ExecutionContext.h"
 #include "common/ObserveResult.h"
 #include "cudaq/algorithms/broadcast.h"
+#include "cudaq/algorithms/observe/policy.h"
 #include "cudaq/concepts.h"
 #include "cudaq/host_config.h"
 #include "cudaq/operators.h"
+#include "cudaq/platform.h"
 #include <functional>
 #include <ranges>
 #include <type_traits>
@@ -28,9 +30,6 @@ bool is_initialized();
 template <typename T, typename Func>
 T all_reduce(const T &, const Func &);
 } // namespace mpi
-
-/// @brief Return type for asynchronous observation.
-using async_observe_result = async_result<observe_result>;
 
 namespace parallel {
 /// @brief Multi-GPU Multi-Node (MPI)
@@ -49,21 +48,6 @@ concept ObserveCallValid =
     ValidArgumentsPassed<QuantumKernel, Args...> &&
     HasVoidReturnType<std::invoke_result_t<QuantumKernel, Args...>>;
 
-/// @brief Observe options to provide as an argument to the `observe()`,
-/// `async_observe()` functions.
-/// @param shots number of shots to run for the given kernel, or -1 if not
-/// applicable.
-/// @param noise noise model to use for the sample operation
-/// @param num_trajectories is the optional number of trajectories to be used
-/// when computing the expectation values in the presence of noise. This
-/// parameter is only applied to simulation backends that support noisy
-/// simulation of trajectories.
-struct observe_options {
-  int shots = -1;
-  cudaq::noise_model noise;
-  std::optional<std::size_t> num_trajectories;
-};
-
 namespace details {
 
 /// @brief Take the input KernelFunctor (a lambda that captures runtime
@@ -77,50 +61,43 @@ runObservation(KernelFunctor &&k, const cudaq::spin_op &H,
                details::future *futureResult = nullptr,
                std::size_t batchIteration = 0, std::size_t totalBatchIters = 0,
                std::optional<std::size_t> numTrajectories = {}) {
-  auto ctx = std::make_unique<ExecutionContext>("observe", shots, qpu_id);
-  ctx->kernelName = kernelName;
-  ctx->spin = cudaq::spin_op::canonicalize(H);
+  ExecutionContext ctx("observe", shots, qpu_id);
+  ctx.kernelName = kernelName;
+  ctx.spin = cudaq::spin_op::canonicalize(H);
   if (shots > 0)
-    ctx->shots = shots;
+    ctx.shots = shots;
 
   if (numTrajectories.has_value())
-    ctx->numberTrajectories = *numTrajectories;
+    ctx.numberTrajectories = *numTrajectories;
 
-  ctx->batchIteration = batchIteration;
-  ctx->totalIterations = totalBatchIters;
+  ctx.batchIteration = batchIteration;
+  ctx.totalIterations = totalBatchIters;
 
   // Indicate that this is an asynchronous execution
-  ctx->asyncExec = futureResult != nullptr;
+  ctx.asyncExec = futureResult != nullptr;
 
-  platform.set_exec_ctx(ctx.get());
-  try {
-    k();
-  } catch (...) {
-    platform.reset_exec_ctx();
-    throw;
-  }
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx, std::forward<KernelFunctor>(k));
 
   // If this is an asynchronous execution, we need
   // to store the `cudaq::details::future`
   if (futureResult) {
-    *futureResult = ctx->futureResult;
+    *futureResult = ctx.futureResult;
     return std::nullopt;
   }
 
   // Extract the results
   sample_result data;
   double expectationValue;
-  data = ctx->result;
+  data = ctx.result;
 
   // It is possible for the expectation value to be
   // precomputed, if so grab it and set it so the client gets it
-  if (ctx->expectationValue.has_value())
-    expectationValue = ctx->expectationValue.value_or(0.0);
+  if (ctx.expectationValue.has_value())
+    expectationValue = ctx.expectationValue.value_or(0.0);
   else {
     // If not, we have everything we need to compute it.
     double sum = 0.0;
-    for (const auto &term : ctx->spin.value()) {
+    for (const auto &term : ctx.spin.value()) {
       if (term.is_identity())
         sum += term.evaluate_coefficient().real();
       else
@@ -130,7 +107,7 @@ runObservation(KernelFunctor &&k, const cudaq::spin_op &H,
     expectationValue = sum;
   }
 
-  return observe_result(expectationValue, ctx->spin.value(), data);
+  return observe_result(expectationValue, ctx.spin.value(), data);
 }
 
 /// @brief Take the input KernelFunctor (a lambda that captures runtime
@@ -141,7 +118,6 @@ auto runObservationAsync(KernelFunctor &&wrappedKernel, const spin_op &H,
                          quantum_platform &platform, int shots,
                          const std::string &kernelName,
                          std::size_t qpu_id = 0) {
-
   if (qpu_id >= platform.num_qpus()) {
     throw std::invalid_argument("Provided qpu_id " + std::to_string(qpu_id) +
                                 " is invalid (must be < " +

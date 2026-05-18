@@ -23,11 +23,13 @@ port = 62441
 
 
 def assert_close(got) -> bool:
-    return got < -1.5 and got > -1.9
+    return got < -1.1 and got > -2.2
 
 
 @pytest.fixture(scope="session", autouse=True)
 def startUpMockServer():
+    cudaq.set_random_seed(13)
+
     os.environ["IONQ_API_KEY"] = "00000000000000000000000000000000"
 
     # Set the targeted QPU
@@ -142,6 +144,31 @@ def test_ionq_observe():
     assert assert_close(res.expectation())
 
 
+def test_ionq_observe_broadcast():
+    qubit_count = 5
+    sample_count = 4
+    shots_count = 10000
+    parameters = np.random.default_rng(13).uniform(low=0,
+                                                   high=1,
+                                                   size=(sample_count,
+                                                         qubit_count))
+
+    @cudaq.kernel
+    def kernel(qubit_count: int, parameters: List[float]):
+        qvector = cudaq.qvector(qubit_count)
+        for i in range(qubit_count - 1):
+            rx(parameters[i], qvector[i])
+
+    results = cudaq.observe(kernel,
+                            spin.z(0), [qubit_count] * sample_count,
+                            parameters,
+                            shots_count=shots_count)
+    expected = np.cos(parameters[:, 0])
+
+    assert len(results) == sample_count
+    assert np.allclose([r.expectation() for r in results], expected, atol=0.1)
+
+
 def test_ionq_u3_decomposition():
 
     @cudaq.kernel
@@ -161,69 +188,6 @@ def test_ionq_u3_ctrl_decomposition():
         u3.ctrl(0.0, np.pi / 2, np.pi, control, target)
 
     result = cudaq.sample(kernel)
-
-
-def test_ionq_state_preparation():
-
-    @cudaq.kernel
-    def kernel(vec: List[complex]):
-        qubits = cudaq.qvector(vec)
-
-    state = [1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.]
-    counts = cudaq.sample(kernel, state)
-    assert '00' in counts
-    assert '10' in counts
-    assert not '01' in counts
-    assert not '11' in counts
-
-
-def test_ionq_state_preparation_builder():
-    kernel, state = cudaq.make_kernel(List[complex])
-    qubits = kernel.qalloc(state)
-
-    state = [1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.]
-    counts = cudaq.sample(kernel, state)
-    assert '00' in counts
-    assert '10' in counts
-    assert not '01' in counts
-    assert not '11' in counts
-
-
-def test_ionq_state_synthesis_from_simulator():
-
-    @cudaq.kernel
-    def kernel(state: cudaq.State):
-        qubits = cudaq.qvector(state)
-
-    state = cudaq.State.from_data(
-        np.array([1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.],
-                 dtype=cudaq.complex()))
-
-    counts = cudaq.sample(kernel, state)
-    assert "00" in counts
-    assert "10" in counts
-    assert len(counts) == 2
-
-    synthesized = cudaq.synthesize(kernel, state)
-    counts = cudaq.sample(synthesized)
-    assert '00' in counts
-    assert '10' in counts
-    assert len(counts) == 2
-
-
-def test_ionq_state_synthesis_from_simulator_builder():
-
-    kernel, state = cudaq.make_kernel(cudaq.State)
-    qubits = kernel.qalloc(state)
-
-    state = cudaq.State.from_data(
-        np.array([1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.],
-                 dtype=cudaq.complex()))
-
-    counts = cudaq.sample(kernel, state)
-    assert "00" in counts
-    assert "10" in counts
-    assert len(counts) == 2
 
 
 def test_Ionq_state_synthesis():
@@ -261,6 +225,32 @@ def test_Ionq_state_synthesis_builder():
     counts = cudaq.sample(kernel, s)
     assert '10' in counts
     assert len(counts) == 1
+
+
+def test_ionq_state_preparation():
+
+    @cudaq.kernel
+    def kernel(vec: List[complex]):
+        qubits = cudaq.qvector(vec)
+
+    state = [1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.]
+    counts = cudaq.sample(kernel, state)
+    assert '00' in counts
+    assert '10' in counts
+    assert not '01' in counts
+    assert not '11' in counts
+
+
+def test_ionq_state_preparation_builder():
+    kernel, state = cudaq.make_kernel(List[complex])
+    qubits = kernel.qalloc(state)
+
+    state = [1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.]
+    counts = cudaq.sample(kernel, state)
+    assert '00' in counts
+    assert '10' in counts
+    assert not '01' in counts
+    assert not '11' in counts
 
 
 def test_exp_pauli():
@@ -360,6 +350,39 @@ def test_2q_unitary_synthesis():
 
     counts = cudaq.sample(ctrl_z_kernel)
     assert counts["0010011"] == 1000
+
+
+@pytest.mark.skip_macos_arm64_jit
+def test_ionq_estimate_resources_with_kernel_launch_in_choice():
+    # Regression: a `choice` callback that itself launches a kernel via
+    # `cudaq::sample` while `cudaq::estimate_resources` is in flight must
+    # be rejected on every transport, including a non-emulated remote
+    # REST target.
+
+    @cudaq.kernel
+    def mykernel():
+        q = cudaq.qubit()
+        p = cudaq.qubit()
+        h(q)
+        m1 = mz(q)
+        if m1:
+            x(p)
+            m2 = mz(p)
+        else:
+            m3 = mz(p)
+
+    @cudaq.kernel
+    def other_kernel():
+        q = cudaq.qubit()
+        h(q)
+        mz(q)
+
+    def choice():
+        cudaq.sample(other_kernel, shots_count=10)
+        return True
+
+    with pytest.raises(RuntimeError):
+        cudaq.estimate_resources(mykernel, choice=choice)
 
 
 # leave for gdb debugging

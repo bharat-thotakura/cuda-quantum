@@ -40,32 +40,99 @@ def read_available_backends():
 # `set_target('abc', option = 'xyz')`
 pattern = r"set_target\(\s*(\\?['\"])([^'\"]+)\1(?:\s*,\s*option\s*=\s*(\\?['\"])([^'\"]+)\3)?\)"
 
+# Platform-dependent skip list: notebooks that require GPU/CUDA libraries
+# These cannot run on CPU-only systems even with fallback logic
+GPU_REQUIRED_NOTEBOOKS = [
+    'afqmc.ipynb',  # AFQMC algorithm, times out on CPU
+    'digitized_counterdiabatic_qaoa.ipynb',  # QAOA optimization, times out on CPU
+    'qm_mm_pe.ipynb',  # VQE+SCF with many iterations, times out on CPU
+    'vqe_advanced.ipynb',  # VQE optimization with `mqpu`, requires multi-GPU
+    'edge_detection.ipynb',  # Requires CuPy
+    'entanglement_acc_hamiltonian_simulation.ipynb',  # Requires CuPy
+    'skqd.ipynb',  # Requires CuPy
+    'divisive_clustering_coresets.ipynb',  # Multi-GPU MPI demo
+    'quantum_pagerank.ipynb',  # Requires dynamics target
+]
+
+# Notebooks for which we set a longer timeout.
+LONG_RUNNING_NOTEBOOKS = [
+    "divisive_clustering_coresets.ipynb",
+    "hybrid_quantum_neural_networks.ipynb",
+    "qm_mm_pe.ipynb",
+    "qsci.ipynb",
+    "uccsd_wf_ansatz.ipynb",
+    "vqe_advanced.ipynb",
+]
+
+# TODO: investigate and fix notebook in CI
+EXTERNAL_NETWORK_NOTEBOOKS = [
+    # Downloads `Floki00/qc_unitary_3qubit` from Hugging Face via
+    # DiffusionPipeline.from_pretrained — has timed out at >35 min in CI.
+    "unitary_compilation_diffusion_models.ipynb",
+]
+
 
 def validate(notebook_filename, available_backends):
+    """
+    Validate if a notebook can run with the available backends.
+    
+    This function is fallback-aware: if a notebook has multiple set_target()
+    calls (e.g., `nvidia` with `qpp-cpu` fallback), it will return True if ANY
+    of the targets is available.
+    """
     with open(notebook_filename) as f:
         lines = f.readlines()
+
+    # Check platform-dependent skip list
+    base_name = os.path.basename(notebook_filename)
+    has_gpu = 'nvidia' in available_backends
+    if not has_gpu and base_name in GPU_REQUIRED_NOTEBOOKS:
+        return False
+
+    # Notebooks that depend on external network services (HF, etc.) are too
+    # flaky for CI and are unconditionally skipped during validation.
+    if base_name in EXTERNAL_NETWORK_NOTEBOOKS:
+        return False
+
+    # Collect all set_target calls
+    targets_found = []
     for notebook_content in lines:
-        if re.search(r'\s*\#', notebook_content):
+        # Skip commented lines
+        if re.search(r'^\s*#', notebook_content) or re.search(
+                r'^\s*"#', notebook_content):
             continue
 
         match = re.search(pattern, notebook_content)
         if match:
-            target = match.group(2)
-            return target in available_backends
+            targets_found.append(match.group(2))
+
+    # Also check --target flags in shell commands
     for notebook_content in lines:
         match = re.search('--target ([^ ]+)', notebook_content)
-        if match and (match.group(1) not in available_backends):
-            return False
-    return True
+        if match:
+            targets_found.append(match.group(1))
+
+    # If no targets specified, notebook uses default (`qpp-cpu`) - allow it
+    if not targets_found:
+        return True
+
+    # If ANY target is available (including fallback), allow the notebook
+    return any(target in available_backends for target in targets_found)
 
 
-def execute(notebook_filename, jupyter_kernel=None):
+def execute(notebook_filename, jupyter_kernel=None, timeout_seconds=300):
+    """Execute a notebook with timeout."""
     notebook_filename_out = notebook_filename.replace('.ipynb',
                                                       '.nbconvert.ipynb')
+    notebook_basename = os.path.basename(notebook_filename)
+    if notebook_basename in LONG_RUNNING_NOTEBOOKS:
+        timeout_seconds = 2100
+
     try:
         start_time = time.perf_counter()
         cmd = [
             "jupyter", "nbconvert", "--to", "notebook", "--execute",
+            f"--ExecutePreprocessor.timeout={timeout_seconds}",
             notebook_filename
         ]
         if jupyter_kernel:
@@ -73,12 +140,11 @@ def execute(notebook_filename, jupyter_kernel=None):
 
         subprocess.run(cmd, check=True)
         elapsed = time.perf_counter() - start_time
-        print(
-            f"Time taken for nbconvert : {elapsed:.2f} seconds for '{notebook_filename}'"
-        )
+        print(f"  ✓  {notebook_basename}: {elapsed:.1f}s")
         return True
     except subprocess.CalledProcessError:
-        print('Error executing the notebook "%s".\n\n' % notebook_filename)
+        elapsed = time.perf_counter() - start_time
+        print(f"  ✗  {notebook_basename}: FAILED after {elapsed:.1f}s")
         return False
     finally:
         if os.path.exists(notebook_filename_out):
@@ -128,7 +194,7 @@ if __name__ == "__main__":
     else:
         available_backends = read_available_backends()
         notebook_filenames = [
-            str(fn.relative_to(Path(__file__).parent))
+            str(fn)  # Use absolute paths for robustness
             for fn in Path(__file__).parent.rglob('*.ipynb')
             if not fn.name.endswith('.nbconvert.ipynb')
         ]
@@ -140,11 +206,7 @@ if __name__ == "__main__":
         notebooks_success, notebooks_skipped, notebooks_failed = (
             [] for i in range(3))
 
-        ## `quantum_transformer`:
-        ## See: https://github.com/NVIDIA/cuda-quantum/issues/2689
-        notebooks_skipped = [
-            'quantum_transformer.ipynb', 'logical_aim_sqale.ipynb'
-        ]
+        notebooks_skipped = []
 
         for notebook_filename in notebook_filenames:
             base_name = os.path.basename(notebook_filename)

@@ -19,7 +19,11 @@
 #include <complex>
 #include <vector>
 
-namespace quake {
+namespace llvm {
+class DataLayout;
+}
+
+namespace cudaq::quake {
 class StateType;
 }
 
@@ -44,6 +48,12 @@ namespace factory {
 constexpr const char targetTripleAttrName[] = "llvm.triple";
 constexpr const char targetDataLayoutAttrName[] = "llvm.data_layout";
 
+/// Padding size for std::vector<bool> host type representation.
+/// `libc++` (macOS) uses 24-byte layout, `libstdc++` (Linux) uses 40-byte
+/// layout. The padding is `sizeof(std::vector<bool>)` - `sizeof(void*)`.
+constexpr std::size_t stdVecBoolPaddingSize =
+    sizeof(std::vector<bool>) - sizeof(void *);
+
 //===----------------------------------------------------------------------===//
 // Type builders
 //===----------------------------------------------------------------------===//
@@ -59,7 +69,7 @@ inline mlir::Type getCharType(mlir::MLIRContext *ctx) {
 
 /// Return the LLVM-IR dialect `ptr` type.
 inline mlir::Type getPointerType(mlir::MLIRContext *ctx) {
-  return mlir::LLVM::LLVMPointerType::get(getCharType(ctx));
+  return mlir::LLVM::LLVMPointerType::get(ctx);
 }
 
 /// The type of a dynamic buffer as returned via the runtime.
@@ -73,9 +83,9 @@ inline mlir::Type getOpaquePointerType(mlir::MLIRContext *ctx) {
   return mlir::LLVM::LLVMPointerType::get(ctx, /*addressSpace=*/0);
 }
 
-/// Return the LLVM-IR dialect type: `ty*`.
+/// Return the LLVM-IR dialect type: `ptr`. (changed for modern LLVM.)
 inline mlir::Type getPointerType(mlir::Type ty) {
-  return mlir::LLVM::LLVMPointerType::get(ty);
+  return factory::getPointerType(ty.getContext());
 }
 
 cudaq::cc::PointerType getIndexedObjectType(mlir::Type eleTy);
@@ -122,7 +132,7 @@ inline mlir::Type getStringType(mlir::MLIRContext *ctx, std::size_t length) {
 inline mlir::LLVM::LLVMStructType stdVectorImplType(mlir::Type eleTy) {
   auto *ctx = eleTy.getContext();
   // Map stdvec<complex<T>> to stdvec<struct<T,T>>
-  if (auto cTy = dyn_cast<mlir::ComplexType>(eleTy)) {
+  if (auto cTy = mlir::dyn_cast<mlir::ComplexType>(eleTy)) {
     llvm::SmallVector<mlir::Type> types = {cTy.getElementType(),
                                            cTy.getElementType()};
     eleTy = mlir::LLVM::LLVMStructType::getLiteral(ctx, types);
@@ -157,7 +167,7 @@ inline mlir::LLVM::ConstantOp genLlvmI32Constant(mlir::Location loc,
                                                  std::int32_t val) {
   auto idx = builder.getI32IntegerAttr(val);
   auto i32Ty = builder.getI32Type();
-  return builder.create<mlir::LLVM::ConstantOp>(loc, i32Ty, idx);
+  return mlir::LLVM::ConstantOp::create(builder, loc, i32Ty, idx);
 }
 
 inline mlir::LLVM::ConstantOp genLlvmI64Constant(mlir::Location loc,
@@ -165,14 +175,14 @@ inline mlir::LLVM::ConstantOp genLlvmI64Constant(mlir::Location loc,
                                                  std::int64_t val) {
   auto idx = builder.getI64IntegerAttr(val);
   auto i64Ty = builder.getI64Type();
-  return builder.create<mlir::LLVM::ConstantOp>(loc, i64Ty, idx);
+  return mlir::LLVM::ConstantOp::create(builder, loc, i64Ty, idx);
 }
 
 inline mlir::Value createFloatConstant(mlir::Location loc,
                                        mlir::OpBuilder &builder,
                                        llvm::APFloat value,
                                        mlir::FloatType type) {
-  return builder.create<mlir::arith::ConstantFloatOp>(loc, value, type);
+  return mlir::arith::ConstantFloatOp::create(builder, loc, type, value);
 }
 
 inline mlir::Value createFloatConstant(mlir::Location loc,
@@ -194,6 +204,9 @@ std::optional<std::uint64_t> maybeValueOfIntConstant(mlir::Value v);
 /// Return the floating point value if \p v is a floating-point constant.
 std::optional<double> maybeValueOfFloatConstant(mlir::Value v);
 
+/// Is \p v defined by a `ConstantLike` `Operation`?
+bool isConstantOp(mlir::Value v);
+
 /// Create a temporary on the stack. The temporary is created such that it is
 /// \em{not} control dependent (other than on function entry).
 mlir::Value createLLVMTemporary(mlir::Location loc, mlir::OpBuilder &builder,
@@ -211,11 +224,16 @@ inline mlir::Block *addEntryBlock(mlir::LLVM::GlobalOp initVar) {
 
 /// Return an i64 array where element `k` is `N` if the
 /// operand `k` is `veq<N>` and 0 otherwise.
+/// \p originalControls contains the pre-conversion quake control values,
+/// used to distinguish `veq` from ref types (necessary with opaque pointers
+/// where both convert to the same !llvm.ptr type).
 mlir::Value packIsArrayAndLengthArray(mlir::Location loc,
                                       mlir::ConversionPatternRewriter &rewriter,
                                       mlir::ModuleOp parentModule,
                                       std::size_t numOperands,
-                                      mlir::ValueRange operands);
+                                      mlir::ValueRange operands,
+                                      mlir::ValueRange originalControls);
+
 mlir::FlatSymbolRefAttr
 createLLVMFunctionSymbol(mlir::StringRef name, mlir::Type retType,
                          mlir::ArrayRef<mlir::Type> inArgTypes,

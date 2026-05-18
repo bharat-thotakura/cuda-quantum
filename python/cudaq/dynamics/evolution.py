@@ -19,6 +19,7 @@ from cudaq.kernel.kernel_builder import PyKernel, make_kernel
 from cudaq.kernel.register_op import register_operation
 from cudaq.kernel.utils import ahkPrefix
 from cudaq.mlir._mlir_libs._quakeDialects import cudaq_runtime
+from cudaq.util import trace
 from ..operators import NumericType, Operator, RydbergHamiltonian, SuperOperator
 from .helpers import InitialState, InitialStateArgT, IntermediateResultSave
 from .integrator import BaseIntegrator
@@ -141,18 +142,8 @@ def _launch_analog_hamiltonian_kernel(target_name: str,
 
     ctx = cudaq_runtime.ExecutionContext("sample", shots_count)
     ctx.asyncExec = is_async
-    cudaq_runtime.setExecutionContext(ctx)
-    try:
+    with ctx:
         cudaq_runtime.pyAltLaunchAnalogKernel(funcName, program.to_json())
-    except BaseException:
-        # silence any further exceptions
-        try:
-            cudaq_runtime.resetExecutionContext()
-        except BaseException:
-            pass
-        raise
-    else:
-        cudaq_runtime.resetExecutionContext()
 
     return ctx.asyncResult if is_async else ctx.result
 
@@ -321,6 +312,7 @@ def evolve_single(
 
 
 # Top level API for the CUDA-Q master equation solver.
+@trace.traced
 def evolve(
     hamiltonian: Operator | SuperOperator | Sequence[Operator] |
     Sequence[SuperOperator],
@@ -599,6 +591,7 @@ def evolve_single_async(
                                           shots_count=shots_count)
 
 
+@trace.traced
 def evolve_async(
     hamiltonian: Operator,
     dimensions: Mapping[int, int] = {},

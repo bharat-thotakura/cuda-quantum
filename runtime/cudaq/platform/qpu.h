@@ -9,32 +9,36 @@
 #pragma once
 
 #include "QuantumExecutionQueue.h"
-#include "common/Logger.h"
+#include "common/CompiledModule.h"
+#include "common/KernelArgs.h"
 #include "common/Registry.h"
 #include "common/ThunkInterface.h"
-#include "common/Timing.h"
-#include "cudaq/qis/execution_manager.h"
-#include "cudaq/qis/qubit_qis.h"
 #include "cudaq/remote_capabilities.h"
-#include "cudaq/utils/cudaq_utils.h"
-#include <optional>
+
+namespace mlir {
+class Type;
+} // namespace mlir
 
 namespace cudaq {
 class gradient;
 class optimizer;
+class noise_model;
+class ExecutionContext;
 
-/// Expose the function that will return the current ExecutionManager
-ExecutionManager *getExecutionManager();
+// forward declare the spin_op type
+template <typename T>
+class sum_op;
+class spin_handler;
+typedef sum_op<spin_handler> spin_op;
 
-/// A CUDA-Q QPU is an abstraction on the quantum processing
-/// unit which executes quantum kernel expressions. The QPU exposes
-/// certain information about the QPU being targeting, such as the
-/// number of available qubits, the logical ID for this QPU in a set
-/// of available QPUs, and its qubit connectivity. The QPU keeps
-/// track of an execution queue for enqueuing asynchronous tasks
-/// that execute quantum kernel expressions. The QPU also tracks the
-/// client-provided execution context to enable quantum kernel
-/// related tasks such as sampling and observation.
+/// A CUDA-Q QPU is an abstraction on the quantum processing unit which executes
+/// quantum kernel expressions. The QPU exposes certain information about the
+/// QPU being targeting, such as the number of available qubits, the logical ID
+/// for this QPU in a set of available QPUs, and its qubit connectivity. The QPU
+/// keeps track of an execution queue for enqueuing asynchronous tasks that
+/// execute quantum kernel expressions. The QPU also tracks the client-provided
+/// execution context to enable quantum kernel related tasks such as sampling
+/// and observation.
 ///
 /// This type is meant to be subtyped by concrete quantum_platform subtypes.
 class QPU : public registry::RegisteredType<QPU> {
@@ -45,64 +49,16 @@ protected:
   std::optional<std::vector<std::pair<std::size_t, std::size_t>>> connectivity;
   std::unique_ptr<QuantumExecutionQueue> execution_queue;
 
-  /// @brief The current execution context.
-  ExecutionContext *executionContext = nullptr;
-
   /// @brief Noise model specified for QPU execution.
   const noise_model *noiseModel = nullptr;
 
-  /// @brief Check if the current execution context is a `spin_op`
-  /// observation and perform state-preparation circuit measurement
-  /// based on the `spin_op` terms.
-  void handleObservation(ExecutionContext *localContext) {
-    // The reason for the 2 if checks is simply to do a flushGateQueue() before
-    // initiating the trace.
-    bool execute = localContext && localContext->name == "observe";
-    if (execute) {
-      ScopedTraceWithContext(cudaq::TIMING_OBSERVE,
-                             "handleObservation flushGateQueue()");
-      getExecutionManager()->flushGateQueue();
-    }
-    if (execute) {
-      ScopedTraceWithContext(cudaq::TIMING_OBSERVE,
-                             "QPU::handleObservation (after flush)");
-      double sum = 0.0;
-      if (!localContext->spin.has_value())
-        throw std::runtime_error("[QPU] Observe ExecutionContext specified "
-                                 "without a cudaq::spin_op.");
+  /// @brief Check if the current execution context is a `spin_op` observation
+  /// and perform state-preparation circuit measurement based on the `spin_op`
+  /// terms.
+  void handleObservation(ExecutionContext &context) const;
 
-      std::vector<cudaq::ExecutionResult> results;
-      cudaq::spin_op &H = localContext->spin.value();
-      assert(cudaq::spin_op::canonicalize(H) == H);
-
-      // If the backend supports the observe task,
-      // let it compute the expectation value instead of
-      // manually looping over terms, applying basis change ops,
-      // and computing <ZZ..ZZZ>
-      if (localContext->canHandleObserve) {
-        auto [exp, data] = cudaq::measure(H);
-        localContext->expectationValue = exp;
-        localContext->result = data;
-      } else {
-
-        // Loop over each term and compute coeff * <term>
-        for (const auto &term : H) {
-          if (term.is_identity())
-            sum += term.evaluate_coefficient().real();
-          else {
-            // This takes a longer time for the first iteration unless
-            // flushGateQueue() is called above.
-            auto [exp, data] = cudaq::measure(term);
-            results.emplace_back(data.to_map(), term.get_term_id(), exp);
-            sum += term.evaluate_coefficient().real() * exp;
-          }
-        };
-
-        localContext->expectationValue = sum;
-        localContext->result = cudaq::sample_result(sum, results);
-      }
-    }
-  }
+  [[nodiscard]] static KernelThunkResultType
+  runJITCompiledModule(const CompiledModule &compiled, KernelArgs args);
 
 public:
   /// The constructor, initializes the execution queue
@@ -137,9 +93,6 @@ public:
   /// Is this QPU a simulator ?
   virtual bool isSimulator() { return true; }
 
-  /// @brief Return whether this QPU has conditional feedback support
-  virtual bool supportsConditionalFeedback() { return false; }
-
   /// @brief Return whether this QPU supports explicit measurements
   virtual bool supportsExplicitMeasurements() { return true; }
 
@@ -162,10 +115,25 @@ public:
   virtual void
   enqueue(QuantumTask &task) = 0; //{ execution_queue->enqueue(task); }
 
-  /// Set the execution context, meant for subtype specification
-  virtual void setExecutionContext(ExecutionContext *context) = 0;
-  /// Reset the execution context, meant for subtype specification
-  virtual void resetExecutionContext() = 0;
+  /// @brief Configure the execution context for this QPU.
+  virtual void configureExecutionContext(ExecutionContext &context) const {}
+
+  /// @brief Post-process the execution results stored in @p context for this
+  /// QPU.
+  virtual void finalizeExecutionContext(ExecutionContext &context) const {}
+
+  /// @brief Prepare the QPU for a new execution.
+  ///
+  /// This is called after the execution context has been configured and is
+  /// already set.
+  virtual void beginExecution() {}
+
+  /// @brief Clean up after an execution on this QPU.
+  ///
+  /// This is called after the execution context has been finalized and before
+  /// the execution context is reset.
+  virtual void endExecution() {}
+
   virtual void setTargetBackend(const std::string &backend) {}
 
   virtual void launchVQE(const std::string &name, const void *kernelArgs,
@@ -173,27 +141,24 @@ public:
                          cudaq::optimizer &optimizer, const int n_params,
                          const std::size_t shots) {}
 
-  /// Launch the kernel with given name (to extract its Quake representation).
-  /// The raw function pointer is also provided, as are the runtime arguments,
-  /// as a struct-packed void pointer and its corresponding size.
   [[nodiscard]] virtual KernelThunkResultType
-  launchKernel(const std::string &name, KernelThunkType kernelFunc, void *args,
-               std::uint64_t, std::uint64_t,
-               const std::vector<void *> &rawArgs) = 0;
+  unifiedLaunchModule(const AnyModule &module, KernelArgs args);
 
-  /// Launch the kernel with given name and argument arrays.
-  // This is intended for any QPUs whereby we need to JIT-compile the kernel
-  // with argument synthesis. The QPU implementation must override this.
-  virtual void launchKernel(const std::string &name,
-                            const std::vector<void *> &rawArgs) {
-    if (!isRemote())
-      throw std::runtime_error("Wrong kernel launch point: Attempt to launch "
-                               "kernel in streamlined for JIT mode on local "
-                               "simulated QPU. This is not supported.");
-  }
+  [[nodiscard]] virtual CompiledModule
+  compileModule(const SourceModule &src, KernelArgs args, bool isEntryPoint);
 
   /// @brief Notify the QPU that a new random seed value is set.
   /// By default do nothing, let subclasses override.
   virtual void onRandomSeedSet(std::size_t seed) {}
 };
+
+struct ModuleLauncher : public registry::RegisteredType<ModuleLauncher> {
+  virtual ~ModuleLauncher() = default;
+
+  /// Compile (specialize + JIT) a kernel module and return a ready-to-execute
+  /// CompiledModule.
+  virtual CompiledModule compileModule(const SourceModule &src, KernelArgs args,
+                                       bool isEntryPoint) = 0;
+};
+
 } // namespace cudaq

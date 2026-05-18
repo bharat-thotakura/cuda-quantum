@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
+#include "cudaq/Optimizer/Builder/Factory.h"
 #include "cudaq/Optimizer/Builder/Runtime.h"
 #include "cudaq/Optimizer/CodeGen/CudaqFunctionNames.h"
 #include "cudaq/Optimizer/CodeGen/QIRFunctionNames.h"
@@ -21,11 +22,22 @@ using namespace mlir;
 // Strings that are longer than this length will be hashed to MD5 names to avoid
 // unnecessarily long symbol names. (This is a hidden command line option, so
 // that hashing issues can be easily worked around.)
-static llvm::cl::opt<std::size_t> nameLengthHashSize(
-    "length-to-hash-string-literal",
-    llvm::cl::desc("string literals that exceed this length will use a hash "
-                   "value as their symbol name"),
-    llvm::cl::init(32));
+namespace {
+struct CLOptions {
+  llvm::cl::opt<std::size_t> nameLengthHashSize{
+      "length-to-hash-string-literal",
+      llvm::cl::desc("string literals that exceed this length will use a hash "
+                     "value as their symbol name"),
+      llvm::cl::init(32)};
+};
+} // namespace
+
+static llvm::ManagedStatic<CLOptions> clOptions;
+
+void cudaq::opt::builder::registerCUDAQBuilderCLOptions() {
+  // Initialize the command-line options lazily.
+  *clOptions;
+}
 
 static constexpr std::size_t DefaultPrerequisiteSize = 4;
 
@@ -63,7 +75,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
 )#"},
 
     {cudaq::runtime::deviceCodeHolderAdd, {}, R"#(
-  llvm.func @__cudaq_deviceCodeHolderAdd(!llvm.ptr<i8>, !llvm.ptr<i8>) attributes {sym_visibility = "private"}
+  llvm.func @__cudaq_deviceCodeHolderAdd(!llvm.ptr, !llvm.ptr) attributes {sym_visibility = "private"}
 )#"},
 
     {cudaq::runtime::getLinkableKernelKey, {}, R"#(
@@ -208,7 +220,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     %false = arith.constant false
     %to0 = cc.cast %dest : (!cc.ptr<i64>) -> !cc.ptr<i8>
     %from0 = cc.cast %src : (!cc.ptr<!cc.array<i64 x ?>>) -> !cc.ptr<i8>
-    call @llvm.memcpy.p0i8.p0i8.i64(%to0, %from0, %len, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+    call @llvm.memcpy.p0.p0.i64(%to0, %from0, %len, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
     return
   }
 )#"},
@@ -260,11 +272,11 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     %3 = call @malloc(%2) : (i64) -> !cc.ptr<i8>
     %10 = cc.cast %3 : (!cc.ptr<i8>) -> !cc.ptr<!cc.array<i8 x ?>>
     %false = arith.constant false
-    call @llvm.memcpy.p0i8.p0i8.i64(%3, %arg0, %arg1, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+    call @llvm.memcpy.p0.p0.i64(%3, %arg0, %arg1, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
     %4 = cc.compute_ptr %arg2[0] : (!cc.ptr<!cc.struct<{!cc.ptr<i8>, i64}>>) -> !cc.ptr<!cc.ptr<i8>>
     %5 = cc.load %4 : !cc.ptr<!cc.ptr<i8>>
     %6 = cc.compute_ptr %10[%arg1] : (!cc.ptr<!cc.array<i8 x ?>>, i64) -> !cc.ptr<i8>
-    call @llvm.memcpy.p0i8.p0i8.i64(%6, %5, %1, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+    call @llvm.memcpy.p0.p0.i64(%6, %5, %1, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
     %7 = cc.undef !cc.struct<{!cc.ptr<i8>, i64}>
     %8 = cc.insert_value %7[0], %3 : (!cc.struct<{!cc.ptr<i8>, i64}>, !cc.ptr<i8>) -> !cc.struct<{!cc.ptr<i8>, i64}>
     %9 = cc.insert_value %8[1], %2 : (!cc.struct<{!cc.ptr<i8>, i64}>, i64) -> !cc.struct<{!cc.ptr<i8>, i64}>
@@ -304,11 +316,17 @@ static constexpr IntrinsicCode intrinsicTable[] = {
   }
 )#"},
 
-    {cudaq::createCudaqStateFromDataFP32, {}, R"#(
-  func.func private @__nvqpp_cudaq_state_createFromData_fp32(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
+    {cudaq::createCudaqStateFromDataComplexF32, {}, R"#(
+  func.func private @__nvqpp_cudaq_state_createFromData_complex_f32(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
 )#"},
-    {cudaq::createCudaqStateFromDataFP64, {}, R"#(
-  func.func private @__nvqpp_cudaq_state_createFromData_fp64(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
+    {cudaq::createCudaqStateFromDataComplexF64, {}, R"#(
+  func.func private @__nvqpp_cudaq_state_createFromData_complex_f64(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
+)#"},
+    {cudaq::createCudaqStateFromDataF32, {}, R"#(
+  func.func private @__nvqpp_cudaq_state_createFromData_f32(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
+)#"},
+    {cudaq::createCudaqStateFromDataF64, {}, R"#(
+  func.func private @__nvqpp_cudaq_state_createFromData_f64(%p : !cc.ptr<i8>, %s : i64) -> !cc.ptr<!quake.state>
 )#"},
 
     {cudaq::deleteCudaqState, {}, R"#(
@@ -317,6 +335,10 @@ static constexpr IntrinsicCode intrinsicTable[] = {
 
     {cudaq::getNumQubitsFromCudaqState, {}, R"#(
   func.func private @__nvqpp_cudaq_state_numberOfQubits(%p : !cc.ptr<!quake.state>) -> i64
+)#"},
+
+    {"__nvqpp_customop_size_error", {}, R"#(
+  func.func private @__nvqpp_customop_size_error(i64, i64)
 )#"},
 
     {cudaq::runtime::bindingDeconstructString,
@@ -371,90 +393,6 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     {cudaq::stdvecBoolCtorFromInitList, {}, R"#(
   func.func private @__nvqpp_initializer_list_to_vector_bool(!cc.ptr<none>, !cc.ptr<none>, i64) -> ())#"},
 
-    // Compute the number of digits in base 10 of a non-negative i64 value.
-    // argument 0: the unsigned value
-    {"__nvqpp_internal_number_of_digits", {}, R"#(
-  func.func private @__nvqpp_internal_number_of_digits(%arg0: i64) -> i64 {
-    %c10_i64 = arith.constant 10 : i64
-    %c1_i64 = arith.constant 1 : i64
-    cf.br ^bb1(%arg0, %c1_i64 : i64, i64)
-  ^bb1(%0: i64, %1: i64):  // 2 preds: ^bb0, ^bb2
-    %2 = arith.cmpi uge, %0, %c10_i64 : i64
-    cf.cond_br %2, ^bb2(%0, %1 : i64, i64), ^bb3(%1 : i64)
-  ^bb2(%3: i64, %4: i64):  // pred: ^bb1
-    %5 = arith.divui %3, %c10_i64 : i64
-    %6 = arith.addi %4, %c1_i64 : i64
-    cf.br ^bb1(%5, %6 : i64, i64)
-  ^bb3(%7: i64):  // pred: ^bb1
-    return %7 : i64
-  } 
-  )#"},
-
-    // Convert a non-negative i64 value to a string base 10 for printing.
-    // argument 0: buffer from cc.alloca !cc.array<i8 x 32>
-    // argument 1: the unsigned value
-    {"__nvqpp_internal_tostring", {}, R"#(
-  func.func private @__nvqpp_internal_tostring(%arg0: !cc.ptr<!cc.array<i8 x ?>>, %arg1: i64) {
-    %c48_i64 = arith.constant 48 : i64
-    %c0_i8 = arith.constant 0 : i8
-    %c10_i64 = arith.constant 10 : i64
-    %c1_i32 = arith.constant 1 : i32
-    %c31_i32 = arith.constant 31 : i32
-    %false = arith.constant false
-    %c0_i64 = arith.constant 0 : i64
-    %c48_i8 = arith.constant 48 : i8
-    %c0_i32 = arith.constant 0 : i32
-    %0 = cc.cast %arg0 : (!cc.ptr<!cc.array<i8 x ?>>) -> !cc.ptr<i8>
-    cc.store %c48_i8, %0 : !cc.ptr<i8>
-    cf.br ^bb1(%c0_i32, %arg1 : i32, i64)
-  ^bb1(%1: i32, %2: i64):  // 2 preds: ^bb0, ^bb4
-    %3 = arith.cmpi ne, %2, %c0_i64 : i64
-    %4 = arith.cmpi eq, %3, %false : i1
-    cf.cond_br %4, ^bb3(%false : i1), ^bb2
-  ^bb2:  // pred: ^bb1
-    %5 = arith.cmpi slt, %1, %c31_i32 : i32
-    cf.br ^bb3(%5 : i1)
-  ^bb3(%6: i1):  // 2 preds: ^bb1, ^bb2
-    cf.cond_br %6, ^bb4(%1, %2 : i32, i64), ^bb5(%1 : i32)
-  ^bb4(%7: i32, %8: i64):  // pred: ^bb3
-    %9 = arith.addi %7, %c1_i32 : i32
-    %10 = cc.compute_ptr %arg0[%7] : (!cc.ptr<!cc.array<i8 x ?>>, i32) -> !cc.ptr<i8>
-    %11 = arith.remui %8, %c10_i64 : i64
-    %12 = arith.addi %11, %c48_i64 : i64
-    %13 = cc.cast %12 : (i64) -> i8
-    cc.store %13, %10 : !cc.ptr<i8>
-    %14 = arith.divui %8, %c10_i64 : i64
-    cf.br ^bb1(%9, %14 : i32, i64)
-  ^bb5(%15: i32):  // pred: ^bb3
-    %16 = arith.cmpi eq, %15, %c0_i32 : i32
-    cf.cond_br %16, ^bb6, ^bb7(%15 : i32)
-  ^bb6:  // pred: ^bb5
-    %17 = cc.compute_ptr %arg0[1] : (!cc.ptr<!cc.array<i8 x ?>>) -> !cc.ptr<i8>
-    cc.store %c0_i8, %17 : !cc.ptr<i8>
-    return
-  ^bb7(%18: i32):  // pred: ^bb5
-    %19 = cc.compute_ptr %arg0[%18] : (!cc.ptr<!cc.array<i8 x ?>>, i32) -> !cc.ptr<i8>
-    cc.store %c0_i8, %19 : !cc.ptr<i8>
-    %20 = arith.subi %18, %c1_i32 : i32
-    cf.br ^bb8(%20, %c0_i32 : i32, i32)
-  ^bb8(%21: i32, %22: i32):  // 2 preds: ^bb7, ^bb9
-    %23 = arith.cmpi slt, %22, %21 : i32
-    cf.cond_br %23, ^bb9(%21, %22 : i32, i32), ^bb10
-  ^bb9(%24: i32, %25: i32):  // pred: ^bb8
-    %26 = cc.compute_ptr %arg0[%25] : (!cc.ptr<!cc.array<i8 x ?>>, i32) -> !cc.ptr<i8>
-    %27 = cc.load %26 : !cc.ptr<i8>
-    %28 = cc.compute_ptr %arg0[%24] : (!cc.ptr<!cc.array<i8 x ?>>, i32) -> !cc.ptr<i8>
-    %29 = cc.load %28 : !cc.ptr<i8>
-    cc.store %29, %26 : !cc.ptr<i8>
-    %30 = arith.subi %24, %c1_i32 : i32
-    cc.store %27, %28 : !cc.ptr<i8>
-    %31 = arith.addi %25, %c1_i32 : i32
-    cf.br ^bb8(%30, %31 : i32, i32)
-  ^bb10:  // pred: ^bb8
-    return
-  }
-  )#"},
-
     // This helper function copies a buffer off the stack to the heap. This is
     // required when the data on the stack is about to go out of scope but is
     // still live.
@@ -463,7 +401,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     %size = arith.muli %arg1, %arg2 : i64
     %0 = call @malloc(%size) : (i64) -> !cc.ptr<i8>
     %false = arith.constant false
-    call @llvm.memcpy.p0i8.p0i8.i64(%0, %arg0, %size, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+    call @llvm.memcpy.p0.p0.i64(%0, %arg0, %size, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
     return %0 : !cc.ptr<i8>
   }
 )#"},
@@ -474,7 +412,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     {"__nvqpp_vectorCopyToStack", {cudaq::llvmMemCopyIntrinsic, "free"}, R"#(
   func.func private @__nvqpp_vectorCopyToStack(%to: !cc.ptr<i8>, %from: !cc.ptr<i8>, %size: i64) {
     %false = arith.constant false
-    call @llvm.memcpy.p0i8.p0i8.i64(%to, %from, %size, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+    call @llvm.memcpy.p0.p0.i64(%to, %from, %size, %false) : (!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
     call @free(%from) : (!cc.ptr<i8>) -> ()
     return
   })#"},
@@ -485,8 +423,11 @@ static constexpr IntrinsicCode intrinsicTable[] = {
 )#"},
 
     // __nvqpp_vector_bool_to_initializer_list
+    // The array size is factory::stdVecBoolPaddingSize to match the host
+    // std::vector<bool> layout. The {PADDING_SIZE} placeholder is replaced
+    // at load time.
     {cudaq::stdvecBoolUnpackToInitList, {}, R"#(
-  func.func private @__nvqpp_vector_bool_to_initializer_list(!cc.ptr<!cc.struct<{!cc.ptr<i1>, !cc.ptr<i1>, !cc.ptr<i1>}>>, !cc.ptr<!cc.struct<{!cc.ptr<i1>, !cc.array<i8 x 32>}>>, !cc.ptr<!cc.ptr<i8>>) -> ()
+  func.func private @__nvqpp_vector_bool_to_initializer_list(!cc.ptr<!cc.struct<{!cc.ptr<i1>, !cc.ptr<i1>, !cc.ptr<i1>}>>, !cc.ptr<!cc.struct<{!cc.ptr<i1>, !cc.array<i8 x {PADDING_SIZE}>}>>, !cc.ptr<!cc.ptr<i8>>) -> ()
 )#"},
 
     {"__nvqpp_zeroDynamicResult", {}, R"#(
@@ -515,11 +456,26 @@ static constexpr IntrinsicCode intrinsicTable[] = {
     {cudaq::opt::QIRBoolRecordOutput, {}, R"#(
   func.func private @__quantum__rt__bool_record_output(i1 {llvm.zeroext}, !cc.ptr<i8>)
 )#"},
+    {cudaq::opt::QIRBoolSpanRecordOutput,
+     {cudaq::opt::QIRArrayRecordOutput, cudaq::opt::QIRBoolRecordOutput},
+     R"#(
+  func.func private @__quantum__rt__bool_span_record_output(!cc.ptr<i8>, i64)
+)#"},
     {cudaq::opt::QIRDoubleRecordOutput, {}, R"#(
   func.func private @__quantum__rt__double_record_output(f64, !cc.ptr<i8>)
 )#"},
+    {cudaq::opt::QIRFloatSpanRecordOutput,
+     {cudaq::opt::QIRArrayRecordOutput, cudaq::opt::QIRDoubleRecordOutput},
+     R"#(
+  func.func private @__quantum__rt__float_span_record_output(!cc.ptr<i8>, i64, i32)
+)#"},
     {cudaq::opt::QIRIntegerRecordOutput, {}, R"#(
   func.func private @__quantum__rt__int_record_output(i64, !cc.ptr<i8>)
+)#"},
+    {cudaq::opt::QIRIntSpanRecordOutput,
+     {cudaq::opt::QIRArrayRecordOutput, cudaq::opt::QIRIntegerRecordOutput},
+     R"#(
+  func.func private @__quantum__rt__int_span_record_output(!cc.ptr<i8>, i64, i32)
 )#"},
     {cudaq::opt::QIRTupleRecordOutput, {}, R"#(
   func.func private @__quantum__rt__tuple_record_output(i64, !cc.ptr<i8>)
@@ -546,7 +502,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
      "func.func private @cudaqRegisterKernelName(!cc.ptr<i8>) -> ()"},
 
     {cudaq::runtime::CudaqRegisterLambdaName, {}, R"#(
-  llvm.func @cudaqRegisterLambdaName(!llvm.ptr<i8>, !llvm.ptr<i8>) attributes {sym_visibility = "private"}
+  llvm.func @cudaqRegisterLambdaName(!llvm.ptr, !llvm.ptr) attributes {sym_visibility = "private"}
 )#"},
 
     {"free", {}, "func.func private @free(!cc.ptr<i8>) -> ()"},
@@ -557,23 +513,23 @@ static constexpr IntrinsicCode intrinsicTable[] = {
   func.func private @hybridLaunchKernel(!cc.ptr<i8>, !cc.ptr<i8>, !cc.ptr<i8>, i64, i64, !cc.ptr<i8>) -> !cc.struct<{!cc.ptr<i8>, i64}>
 )#"},
 
-    // llvm.memcpy.p0i8.p0i8.i64
+    // llvm.memcpy.p0.p0.i64
     {cudaq::llvmMemCopyIntrinsic, {}, R"#(
-  func.func private @llvm.memcpy.p0i8.p0i8.i64(!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
+  func.func private @llvm.memcpy.p0.p0.i64(!cc.ptr<i8>, !cc.ptr<i8>, i64, i1) -> ()
 )#"},
 
-    {cudaq::llvmMemSetIntrinsic, // llvm.memset.p0i8.i64
+    {cudaq::llvmMemSetIntrinsic, // llvm.memset.p0.i64
      {},
      R"#(
-  func.func private @llvm.memset.p0i8.i64(!cc.ptr<i8>, i8, i64, i1) -> ())#"},
+  func.func private @llvm.memset.p0.i64(!cc.ptr<i8>, i8, i64, i1) -> ())#"},
 
     // NB: load llvmStackSave to get both.
     {cudaq::llvmStackRestore,
      {},
-     "func.func private @llvm.stackrestore(!cc.ptr<i8>)"},
+     "func.func private @llvm.stackrestore.p0(!cc.ptr<i8>)"},
     {cudaq::llvmStackSave,
      {cudaq::llvmStackRestore},
-     "func.func private @llvm.stacksave() -> !cc.ptr<i8>"},
+     "func.func private @llvm.stacksave.p0() -> !cc.ptr<i8>"},
 
     {"malloc", {}, "func.func private @malloc(i64) -> !cc.ptr<i8>"},
 
@@ -691,8 +647,8 @@ static constexpr IntrinsicCode intrinsicTable[] = {
   !qir_array = !cc.ptr<none>
   !qir_qubit = !cc.ptr<none>
   !qir_result = !cc.ptr<none>
-  !qir_charptr = !cc.ptr<none>
-  !qir_llvmptr = !llvm.ptr<i8>
+  !qir_charptr = !cc.ptr<i8>
+  !qir_llvmptr = !llvm.ptr
 )#"},
     // Use the obsolete LLVM opaque struct type.
     {"qir_opaque_struct", {}, R"#(
@@ -700,7 +656,7 @@ static constexpr IntrinsicCode intrinsicTable[] = {
   !qir_qubit = !cc.ptr<!llvm.struct<"Qubit", opaque>>
   !qir_result = !cc.ptr<!llvm.struct<"Result", opaque>>
   !qir_charptr = !cc.ptr<i8>
-  !qir_llvmptr = !llvm.ptr<i8>
+  !qir_llvmptr = !llvm.ptr
 )#"},
 
     // streamlinedLaunchKernel(kernelName, vectorArgPtrs)
@@ -741,7 +697,7 @@ LLVM::GlobalOp IRBuilder::genCStringLiteral(Location loc, ModuleOp module,
   auto stringAttr = getStringAttr(cstring);
   OpBuilder::InsertionGuard guard(*this);
   setInsertionPointToEnd(module.getBody());
-  return create<LLVM::GlobalOp>(loc, cstringTy, /*isConstant=*/true,
+  return LLVM::GlobalOp::create(*this, loc, cstringTy, /*isConstant=*/true,
                                 LLVM::Linkage::Private, uniqName, stringAttr,
                                 /*alignment=*/0);
 }
@@ -749,7 +705,7 @@ LLVM::GlobalOp IRBuilder::genCStringLiteral(Location loc, ModuleOp module,
 std::string IRBuilder::hashStringByContent(StringRef sref) {
   // For shorter names just use the string content in hex. (Consider replacing
   // this with a more compact, readable base-64 encoding.)
-  if (sref.size() <= nameLengthHashSize)
+  if (sref.size() <= clOptions->nameLengthHashSize)
     return llvm::toHex(sref);
 
   // Use an MD5 hash for long cstrings. This can produce collisions between
@@ -783,6 +739,18 @@ LogicalResult IRBuilder::loadIntrinsic(ModuleOp module, StringRef intrinName) {
       return failure();
   }
   // Now load the requested code.
+  // For stdvecBoolUnpackToInitList, replace the {PADDING_SIZE} placeholder
+  // with the actual padding size for the host's std::vector<bool>.
+  if (intrinName == cudaq::stdvecBoolUnpackToInitList) {
+    std::string code = iter->code.str();
+    const std::string placeholder = "{PADDING_SIZE}";
+    auto pos = code.find(placeholder);
+    code.replace(pos, placeholder.size(),
+                 std::to_string(opt::factory::stdVecBoolPaddingSize));
+    return parseSourceString(
+        code, module.getBody(),
+        ParserConfig{module.getContext(), /*verifyAfterParse=*/false});
+  }
   return parseSourceString(
       iter->code, module.getBody(),
       ParserConfig{module.getContext(), /*verifyAfterParse=*/false});
@@ -857,9 +825,9 @@ static cc::GlobalOp buildVectorOfConstantElements(Location loc, ModuleOp module,
   builder.setInsertionPointToEnd(module.getBody());
   auto globalTy = cc::ArrayType::get(ctx, eleTy, arrayAttr.size());
   auto global =
-      builder.create<cudaq::cc::GlobalOp>(loc, globalTy, name, arrayAttr,
-                                          /*constant=*/true,
-                                          /*external=*/false);
+      cudaq::cc::GlobalOp::create(builder, loc, globalTy, name, arrayAttr,
+                                  /*constant=*/true,
+                                  /*external=*/false);
   global.setPrivate();
   return global;
 }

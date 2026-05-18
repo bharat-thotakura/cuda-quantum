@@ -6,48 +6,73 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-#include "FermioniqBaseQPU.h"
-// #include "common/BaseRemoteRESTQPU.h"
+#include "FermioniqQPU.h"
+#include "cudaq/runtime/logger/cudaq_fmt.h"
+#include "nlohmann/json.hpp"
+#include <memory>
 
-using namespace mlir;
+cudaq::FermioniqQPU::~FermioniqQPU() = default;
 
-namespace cudaq {
-std::string get_quake_by_name(const std::string &);
-} // namespace cudaq
+cudaq::CompiledModule cudaq::FermioniqQPU::compileImpl(
+    const std::string &kernelName,
+    std::function<cudaq::CompiledModule(cudaq_internal::compiler::Compiler &,
+                                        cudaq::ExecutionContext *)>
+        runPassPipeline) {
+  auto *executionContext = getExecutionContext();
+  // TODO future iterations of this should support non-void return types.
+  if (!executionContext)
+    throw std::runtime_error(
+        "Remote rest execution can only be performed via cudaq::sample(), "
+        "cudaq::observe(), or cudaq::contrib::draw().");
 
-namespace {
+  // When the user issues an observe call, we don't want to use the default
+  // CUDA-Q behaviour that splits up the circuit into several ansatz
+  // sub circuit. Instead, we pass a "sample" context to the compiler to
+  // prevent circuit splitting. This target handles observable evaluation
+  // server-side.
+  cudaq::ExecutionContext sampleContext("sample", 1);
+  ExecutionContext *compileCtx =
+      (executionContext->name == "observe") ? &sampleContext : executionContext;
 
-/// @brief The `FermioniqRestQPU` is a subtype of QPU that enables the
-/// execution of CUDA-Q kernels on the Fermioniq simulator via a REST Client.
-class FermioniqRestQPU : public cudaq::FermioniqBaseQPU {
-protected:
-  std::tuple<ModuleOp, MLIRContext *, void *>
-  extractQuakeCodeAndContext(const std::string &kernelName,
-                             void *data) override {
+  Compiler compiler(serverHelper.get(), backendConfig, targetConfig, noiseModel,
+                    emulate);
+  return runPassPipeline(compiler, compileCtx);
+}
 
-    CUDAQ_INFO("extract quake code\n");
+void cudaq::FermioniqQPU::launchImpl(const cudaq::CompiledModule &compiled) {
+  Compiler compiler(serverHelper.get(), backendConfig, targetConfig, noiseModel,
+                    emulate);
+  auto *executionContext = getExecutionContext();
+  // TODO future iterations of this should support non-void return types.
+  if (!executionContext)
+    throw std::runtime_error(
+        "Remote rest execution can only be performed via cudaq::sample(), "
+        "cudaq::observe(), or cudaq::contrib::draw().");
 
-    auto contextPtr = cudaq::initializeMLIR();
-    MLIRContext &context = *contextPtr.get();
+  auto codes = compiler.emitKernelExecutions(compiled);
 
-    // Get the quake representation of the kernel
-    auto quakeCode = cudaq::get_quake_by_name(kernelName);
-    auto m_module = parseSourceString<ModuleOp>(quakeCode, &context);
-    if (!m_module)
-      throw std::runtime_error("module cannot be parsed");
+  if (codes.size() != 1)
+    throw std::runtime_error("Provider only allows 1 circuit at a time.");
 
-    return std::make_tuple(m_module.release(), contextPtr.release(), data);
+  if (executionContext->name == "observe") {
+    auto spin = executionContext->spin.value();
+    auto user_data = nlohmann::json::object();
+    auto obs = nlohmann::json::array();
+    for (const auto &term : spin) {
+      auto terms = nlohmann::json::array();
+      terms.push_back(term.get_term_id());
+      auto coeff = term.evaluate_coefficient();
+      auto coeff_str = cudaq_fmt::format("{}{}{}j", coeff.real(),
+                                         coeff.imag() < 0.0 ? "-" : "+",
+                                         std::fabs(coeff.imag()));
+      terms.push_back(coeff_str);
+      obs.push_back(terms);
+    }
+    user_data["observable"] = obs;
+    codes[0].user_data = user_data;
   }
 
-  void cleanupContext(MLIRContext *context) override { delete context; }
+  completeLaunchKernel(compiled.getName(), std::move(codes));
+}
 
-public:
-  /// @brief The constructor
-  FermioniqRestQPU() : FermioniqBaseQPU() {}
-
-  FermioniqRestQPU(FermioniqRestQPU &&) = delete;
-  virtual ~FermioniqRestQPU() = default;
-};
-} // namespace
-
-CUDAQ_REGISTER_TYPE(cudaq::QPU, FermioniqRestQPU, fermioniq)
+CUDAQ_REGISTER_TYPE(cudaq::QPU, cudaq::FermioniqQPU, fermioniq)

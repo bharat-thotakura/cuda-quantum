@@ -274,7 +274,7 @@ std::complex<double> MPSSimulationState<ScalarType>::getAmplitude(
     const std::vector<int> &basisState) {
   if (getNumQubits() != basisState.size())
     throw std::runtime_error(
-        fmt::format("[tensornet-state] getAmplitude with an invalid number "
+        cudaq_fmt::format("[tensornet-state] getAmplitude with an invalid number "
                     "of bits in the "
                     "basis state: expected {}, provided {}.",
                     getNumQubits(), basisState.size()));
@@ -543,6 +543,8 @@ std::unique_ptr<cudaq::SimulationState>
 MPSSimulationState<ScalarType>::createFromSizeAndPtr(std::size_t size,
                                                      void *ptr,
                                                      std::size_t dataType) {
+  if (!ptr || size == 0)
+    throw std::runtime_error("[createFromSizeAndPtr] invalid null pointer or zero size");
   if (dataType == cudaq::detail::variant_index<cudaq::state_data,
                                                cudaq::TensorStateData>()) {
     std::vector<MPSTensor> mpsTensors;
@@ -646,7 +648,7 @@ MPSSettings::MPSSettings() {
     }
     svdAlgo = iter->second;
     CUDAQ_INFO("Setting MPS SVD algorithm to {} ({}).",
-               fmt::underlying(svdAlgo), iter->first);
+               cudaq_fmt::underlying(svdAlgo), iter->first);
   }
 
   using GaugePair =
@@ -673,7 +675,7 @@ MPSSettings::MPSSettings() {
     }
     gaugeOption = iter->second;
     CUDAQ_INFO("Setting MPS GAUGE option to {} ({}).", iter->first,
-               fmt::underlying(iter->second));
+               cudaq_fmt::underlying(iter->second));
   }
 }
 
@@ -684,7 +686,7 @@ void MPSSimulationState<ScalarType>::toHostImpl(
   auto stateVec = state->getStateVector();
   if (stateVec.size() != numElements)
     throw std::runtime_error(
-        fmt::format("[MPSSimulationState] Dimension mismatch: expecting {} "
+        cudaq_fmt::format("[MPSSimulationState] Dimension mismatch: expecting {} "
                     "elements but providing an array of size {}.",
                     stateVec.size(), numElements));
   if (std::is_same_v<ScalarType, T>) {

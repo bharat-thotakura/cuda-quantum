@@ -181,6 +181,46 @@ CUDAQ_TEST(KernelsTester, checkFromState) {
   }
 }
 
+CUDAQ_TEST(KernelsTester, checkFromStateBasis) {
+  auto verifyBasis = [](std::size_t numQubits, std::size_t idx) {
+    std::vector<std::complex<double>> state(1ULL << numQubits, 0.0);
+    state[idx] = 1.0;
+    auto kernel = cudaq::make_kernel();
+    auto qubits = kernel.qalloc(numQubits);
+    cudaq::from_state(kernel, qubits, state);
+    auto ss = cudaq::get_state(kernel);
+    for (std::size_t i = 0; i < state.size(); i++)
+      EXPECT_NEAR(std::abs(ss[i] - state[i]), 0.0, 1e-6);
+  };
+
+  for (std::size_t idx = 0; idx < 8; idx++)
+    verifyBasis(3, idx);
+
+  verifyBasis(4, 0);
+  verifyBasis(4, 5);
+  verifyBasis(4, 15);
+
+  {
+    std::vector<std::complex<double>> zero(8, 0.0);
+    auto kernel = cudaq::make_kernel();
+    auto qubits = kernel.qalloc(3);
+    EXPECT_THROW(cudaq::from_state(kernel, qubits, zero),
+                 std::invalid_argument);
+  }
+
+  {
+    constexpr std::size_t numQubits = 16;
+    std::vector<std::complex<double>> state(1ULL << numQubits, 0.0);
+    state[0] = 1.0;
+    auto kernel = cudaq::make_kernel();
+    auto qubits = kernel.qalloc(numQubits);
+    cudaq::from_state(kernel, qubits, state);
+    auto counts = cudaq::sample(kernel);
+    EXPECT_EQ(counts.size(), 1u);
+    EXPECT_EQ(counts.begin()->first, std::string(numQubits, '0'));
+  }
+}
+
 CUDAQ_TEST(KernelsTester, checkSampleBug2937) {
   constexpr int qubit_count = 20;
   auto kernel = cudaq::make_kernel();
@@ -245,18 +285,16 @@ CUDAQ_TEST(KernelsTester, msmTester_mz_only) {
   // result will be returned in ctx_msm_size.shots.
   cudaq::ExecutionContext ctx_msm_size("msm_size");
   auto &platform = cudaq::get_platform();
-  platform.set_exec_ctx(&ctx_msm_size);
-  multi_round_ghz{}(num_qubits, num_rounds);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm_size, multi_round_ghz{}, num_qubits,
+                                  num_rounds);
 
   // Stage 2 - get the MSM using the size calculated above
   // (ctx_msm_size.msm_dimensions).
   cudaq::ExecutionContext ctx_msm("msm");
   ctx_msm.noiseModel = &noise;
   ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-  platform.set_exec_ctx(&ctx_msm);
-  multi_round_ghz{}(num_qubits, num_rounds);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm, multi_round_ghz{}, num_qubits,
+                                  num_rounds);
 
   // The MSM is now stored in ctx_msm.result. More precisely, the unfiltered
   // MSM is stored there, but some post-processing may be required to
@@ -308,18 +346,16 @@ CUDAQ_TEST(KernelsTester, msmTester_mz_and_depol1_corr) {
   // result will be returned in ctx_msm_size.shots.
   cudaq::ExecutionContext ctx_msm_size("msm_size");
   auto &platform = cudaq::get_platform();
-  platform.set_exec_ctx(&ctx_msm_size);
-  multi_round_ghz{}(num_qubits, num_rounds, noise_bf_prob);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm_size, multi_round_ghz{}, num_qubits,
+                                  num_rounds, noise_bf_prob);
 
   // Stage 2 - get the MSM using the size calculated above
   // (ctx_msm_size.msm_dimensions).
   cudaq::ExecutionContext ctx_msm("msm");
   ctx_msm.noiseModel = &noise;
   ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-  platform.set_exec_ctx(&ctx_msm);
-  multi_round_ghz{}(num_qubits, num_rounds, noise_bf_prob);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm, multi_round_ghz{}, num_qubits,
+                                  num_rounds, noise_bf_prob);
 
   // The MSM is now stored in ctx_msm.result. More precisely, the unfiltered
   // MSM is stored there, but some post-processing may be required to
@@ -410,18 +446,15 @@ get_msm_test(double noise_probability) {
   // result will be returned in ctx_msm_size.shots.
   cudaq::ExecutionContext ctx_msm_size("msm_size");
   auto &platform = cudaq::get_platform();
-  platform.set_exec_ctx(&ctx_msm_size);
-  simple_test{}(noise_probability);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm_size, simple_test{},
+                                  noise_probability);
 
   // Stage 2 - get the MSM using the size calculated above
   // (ctx_msm_size.msm_dimensions).
   cudaq::ExecutionContext ctx_msm("msm");
   ctx_msm.noiseModel = &noise;
   ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-  platform.set_exec_ctx(&ctx_msm);
-  simple_test{}(noise_probability);
-  platform.reset_exec_ctx();
+  platform.with_execution_context(ctx_msm, simple_test{}, noise_probability);
 
   return {transpose_msm(ctx_msm.result.sequential_data()),
           ctx_msm.msm_probabilities.value(), ctx_msm.msm_prob_err_id.value()};

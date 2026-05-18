@@ -9,7 +9,7 @@
 add_executable(test_target_config TargetConfigTester.cpp)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
-  target_link_options(test_target_config PRIVATE -Wl,--no-as-needed)
+  target_link_options(test_target_config PRIVATE ${CUDAQ_FORCE_LINK_FLAG})
 endif()
 target_link_libraries(test_target_config
   PRIVATE
@@ -17,4 +17,4 @@ target_link_libraries(test_target_config
     gtest_main
 )
 
-gtest_discover_tests(test_target_config)
+gtest_discover_tests(test_target_config DISCOVERY_TIMEOUT 120)
